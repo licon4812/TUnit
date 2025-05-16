@@ -1,13 +1,6 @@
 ﻿namespace TUnit.Core;
 
 [AttributeUsage(AttributeTargets.Method | AttributeTargets.Class | AttributeTargets.Property, AllowMultiple = true)]
-public abstract class DataSourceGeneratorAttribute<T> : TestDataAttribute, IDataSourceGeneratorAttribute
-{
-    public abstract IEnumerable<Func<T>> GenerateDataSources(DataGeneratorMetadata dataGeneratorMetadata);
-}
-
-// Non-generic version for VB.NET and F# compatibility
-[AttributeUsage(AttributeTargets.Method | AttributeTargets.Class | AttributeTargets.Property, AllowMultiple = true)]
 public abstract class DataSourceGeneratorAttribute(Type dataType) : TestDataAttribute, IDataSourceGeneratorAttribute
 {
     public Type DataType { get; } = dataType ?? throw new ArgumentNullException(nameof(dataType));
