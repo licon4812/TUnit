@@ -7,7 +7,10 @@
     </ItemGroup>
 
     <ItemGroup>
+        <Compile Include="Dummy\SomeAsyncDisposableClass.fs" />
+        <Compile Include="Dummy\ParallelLimit3.fs" />
         <Compile Include="Tests.fs" />
+        <Compile Include="ClassDataSourceDrivenTests.fs" />
     </ItemGroup>
 
     <ItemGroup>
