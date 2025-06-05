@@ -4,6 +4,7 @@ using Microsoft.Testing.Platform.Extensions.Messages;
 using Microsoft.Testing.Platform.Logging;
 using Microsoft.Testing.Platform.Requests;
 using TUnit.Core;
+using TUnit.Engine.Extensions;
 
 namespace TUnit.Engine.Services;
 
@@ -57,6 +58,11 @@ internal class TestFilterService(ILoggerFactory loggerFactory)
             _ => UnhandledFilter(testExecutionFilter)
         };
 
+        if (!shouldRunTest)
+        {
+            discoveredTest.TestContext.ClassContext.RemoveTest(discoveredTest.TestContext);
+        }
+
         return shouldRunTest;
 #pragma warning restore TPEXP
     }
@@ -73,9 +79,14 @@ internal class TestFilterService(ILoggerFactory loggerFactory)
 
     private PropertyBag BuildPropertyBag(TestDetails testDetails)
     {
+        var properties = testDetails.ExtractProperties();
+
+        var categories = testDetails.Categories.Select(x => new TestMetadataProperty(x));
+        
         return new PropertyBag(
             [
-                ..testDetails.CustomProperties.Select(x => new KeyValuePairStringProperty(x.Key, x.Value)),
+                ..properties,
+                ..categories,
                 ..testDetails.Categories.Select(x => new KeyValuePairStringProperty("Category", x))
             ]
         );

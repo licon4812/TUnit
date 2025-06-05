@@ -34,6 +34,20 @@ public class ThrowsException<TActual, TException> where TException : Exception
             , [doNotPopulateThisValue]);
         return this;
     }
+    
+    public ThrowsException<TActual, TException> WithMessageContaining(string expected, [CallerArgumentExpression(nameof(expected))] string? doNotPopulateThisValue = null)
+    {
+        _source.RegisterAssertion(new ThrowsWithMessageContainingAssertCondition<TActual, TException>(expected, StringComparison.Ordinal, _selector)
+            , [doNotPopulateThisValue]);
+        return this;
+    }
+    
+    public ThrowsException<TActual, TException> WithMessageContaining(string expected, StringComparison stringComparison, [CallerArgumentExpression(nameof(expected))] string? doNotPopulateThisValue = null, [CallerArgumentExpression(nameof(stringComparison))] string? doNotPopulateThisValue2 = null)
+    {
+        _source.RegisterAssertion(new ThrowsWithMessageContainingAssertCondition<TActual, TException>(expected, StringComparison.Ordinal, _selector)
+            , [doNotPopulateThisValue, doNotPopulateThisValue2]);
+        return this;
+    }
 
     public ThrowsException<TActual, Exception> WithInnerException()
     {
@@ -58,4 +72,6 @@ public class ThrowsException<TActual, TException> where TException : Exception
     public DelegateOr<object?> Or => _delegateAssertionBuilder.Or;
 
     internal void RegisterAssertion(Func<Func<Exception?, Exception?>, BaseAssertCondition<TActual>> conditionFunc, string?[] argumentExpressions, [CallerMemberName] string? caller = null) => _source.RegisterAssertion(conditionFunc(_selector), argumentExpressions, caller);
+    
+    public static explicit operator Task<TException?>(ThrowsException<TActual, TException> throwsException) => Task.Run(async () => await throwsException);
 }

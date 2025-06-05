@@ -3,24 +3,7 @@
     <PropertyGroup>
         <RoslynVersion>4.7</RoslynVersion>
     </PropertyGroup>
-    
-    <ItemGroup>
-        <PackageReference Include="Microsoft.CodeAnalysis.Common" VersionOverride="$(RoslynVersion).*"/>
-        <PackageReference Include="Microsoft.CodeAnalysis.CSharp" VersionOverride="$(RoslynVersion).*"/>
-        <PackageReference Include="Polyfill">
-            <PrivateAssets>all</PrivateAssets>
-            <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
-        </PackageReference>
-    </ItemGroup>
 
-    <ItemGroup>
-        <Compile Include="..\TUnit.Core.SourceGenerator\**\*.cs" Exclude="..\TUnit.Core.SourceGenerator\obj\**\*.cs" />
-        <Compile Update="..\TUnit.Core.SourceGenerator\CodeGenerators\Helpers\DynamicTestSourceDataModelRetriever.cs">
-          <Link>CodeGenerators\Helpers\DynamicTestSourceDataModelRetriever.cs</Link>
-        </Compile>
-        <Compile Update="..\TUnit.Core.SourceGenerator\Models\DynamicTestSourceDataModel.cs">
-          <Link>Models\DynamicTestSourceDataModel.cs</Link>
-        </Compile>
-    </ItemGroup>
+    <Import Project="..\SourceGenerator.props" />
 
 </Project>

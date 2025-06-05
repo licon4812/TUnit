@@ -1,12 +1,16 @@
 ﻿using System.Collections;
 using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
+using TUnit.Assertions.AssertConditions.Throws;
 using TUnit.Assertions.AssertionBuilders;
+using TUnit.Assertions.Exceptions;
 using TUnit.Assertions.Extensions;
+using TUnit.Assertions.Helpers;
 using TUnit.Assertions.Wrappers;
 
 namespace TUnit.Assertions;
 
+[SuppressMessage("Usage", "TUnitAssertions0002:Assert statements must be awaited")]
 public static class Assert
 {
     public static ValueAssertionBuilder<TActual> That<TActual>(TActual value, [CallerArgumentExpression(nameof(value))] string? doNotPopulateThisValue = null)
@@ -64,57 +68,64 @@ public static class Assert
         return new AssertionScope();
     }
 
-    public static Task<Exception> ThrowsAsync(Func<Task> @delegate,
+    public static ThrowsException<object?, Exception> ThrowsAsync(Func<Task> @delegate,
         [CallerArgumentExpression(nameof(@delegate))] string? doNotPopulateThisValue = null)
         => ThrowsAsync<Exception>(@delegate, doNotPopulateThisValue);
 
-    public static Task<Exception> ThrowsAsync(Task @delegate,
+    public static ThrowsException<object?, Exception> ThrowsAsync(Task @delegate,
         [CallerArgumentExpression(nameof(@delegate))] string? doNotPopulateThisValue = null)
         => ThrowsAsync(async () => await @delegate, doNotPopulateThisValue);
     
-    public static Task<Exception> ThrowsAsync(ValueTask @delegate,
+    public static ThrowsException<object?, Exception> ThrowsAsync(ValueTask @delegate,
         [CallerArgumentExpression(nameof(@delegate))] string? doNotPopulateThisValue = null)
         => ThrowsAsync(async () => await @delegate, doNotPopulateThisValue);
     
-    public static Task<TException> ThrowsAsync<TException>(Task @delegate,
+    public static ThrowsException<object?, TException> ThrowsAsync<TException>(Task @delegate,
         [CallerArgumentExpression(nameof(@delegate))] string? doNotPopulateThisValue = null) where TException : Exception
         => ThrowsAsync<TException>(async () => await @delegate, doNotPopulateThisValue);
     
-    public static Task<TException> ThrowsAsync<TException>(ValueTask @delegate,
+    public static ThrowsException<object?, TException> ThrowsAsync<TException>(ValueTask @delegate,
         [CallerArgumentExpression(nameof(@delegate))] string? doNotPopulateThisValue = null) where TException : Exception
         => ThrowsAsync<TException>(async () => await @delegate, doNotPopulateThisValue);
     
-    public static async Task<TException> ThrowsAsync<TException>(Func<Task> @delegate, [CallerArgumentExpression(nameof(@delegate))] string? doNotPopulateThisValue = null) where TException : Exception
+    public static ThrowsException<object?, TException> ThrowsAsync<TException>(Func<Task> @delegate, [CallerArgumentExpression(nameof(@delegate))] string? doNotPopulateThisValue = null) where TException : Exception
     {
-        return (TException) await ThrowsAsync(typeof(TException), @delegate, doNotPopulateThisValue);
+        var throwsException = ThrowsAsync(typeof(TException), @delegate, doNotPopulateThisValue);
+        
+        return Unsafe.As<ThrowsException<object?, TException>>(throwsException);
     }
     
-    public static Task<Exception> ThrowsAsync(Type type, Task @delegate,
+    public static ThrowsException<object?, Exception> ThrowsAsync(Type type, Task @delegate,
         [CallerArgumentExpression(nameof(@delegate))] string? doNotPopulateThisValue = null)
         => ThrowsAsync(type, async () => await @delegate, doNotPopulateThisValue);
     
-    public static Task<Exception> ThrowsAsync(Type type, ValueTask @delegate,
+    public static ThrowsException<object?, Exception> ThrowsAsync(Type type, ValueTask @delegate,
         [CallerArgumentExpression(nameof(@delegate))] string? doNotPopulateThisValue = null)
         => ThrowsAsync(type, async () => await @delegate, doNotPopulateThisValue);
     
-    public static async Task<Exception> ThrowsAsync(Type type, Func<Task> @delegate, [CallerArgumentExpression(nameof(@delegate))] string? doNotPopulateThisValue = null)
+    public static ThrowsException<object?, Exception> ThrowsAsync(Type type, Func<Task> @delegate, [CallerArgumentExpression(nameof(@delegate))] string? doNotPopulateThisValue = null)
     {
-        try
-        {
-            await @delegate();
-        }
-        catch (Exception e) when (type.IsAssignableFrom(e.GetType()))
-        {
-            return e;
-        }
-        catch (Exception e)
-        {
-            Fail($"Exception is of type {e.GetType().Name} instead of {type.Name} for {doNotPopulateThisValue.GetStringOr("the delegate")}");
-        }
+        return That(@delegate, doNotPopulateThisValue).Throws(type);
+    }
+    
+    public static ThrowsException<object?, TException> ThrowsAsync<TException>(string parameterName,
+        Task @delegate,
+        [CallerArgumentExpression(nameof(@delegate))] string? doNotPopulateThisValue = null,
+        [CallerArgumentExpression(nameof(parameterName))] string? doNotPopulateThisValue2 = null) where TException : ArgumentException
+        => ThrowsAsync<TException>(parameterName, async () => await @delegate, doNotPopulateThisValue, doNotPopulateThisValue2);
 
-        Fail($"No exception was thrown by {doNotPopulateThisValue.GetStringOr("the delegate")}");
-        
-        return null;
+    public static ThrowsException<object?, TException> ThrowsAsync<TException>(string parameterName,
+        ValueTask @delegate,
+        [CallerArgumentExpression(nameof(@delegate))] string? doNotPopulateThisValue = null,
+        [CallerArgumentExpression(nameof(parameterName))] string? doNotPopulateThisValue2 = null) where TException : ArgumentException
+        => ThrowsAsync<TException>(parameterName, async () => await @delegate, doNotPopulateThisValue, doNotPopulateThisValue2);
+
+    public static ThrowsException<object?, TException> ThrowsAsync<TException>(string parameterName,
+        Func<Task> @delegate,
+        [CallerArgumentExpression(nameof(@delegate))] string? doNotPopulateThisValue = null,
+        [CallerArgumentExpression(nameof(parameterName))] string? doNotPopulateThisValue2 = null) where TException : ArgumentException
+    {
+        return That(@delegate, doNotPopulateThisValue).Throws<TException>().WithParameterName(parameterName, doNotPopulateThisValue2);
     }
 
     public static Exception Throws(Action @delegate,
@@ -138,14 +149,35 @@ public static class Assert
         
         Fail($"No exception was thrown by {doNotPopulateThisValue.GetStringOr("the delegate")}");
 
-        return null;
+        return null!;
+    }
+    
+    public static TException Throws<TException>(string parameterName, Action @delegate, [CallerArgumentExpression(nameof(@delegate))] string? doNotPopulateThisValue = null) where TException : ArgumentException
+    {
+        var ex = Throws<TException>(@delegate, doNotPopulateThisValue);
+
+        if (ex.ParamName?.Equals(parameterName, StringComparison.Ordinal) == false)
+        {
+            Fail($"Incorrect parameter name {new StringDifference(ex.ParamName, parameterName).ToString("it differs at index")}");
+        }
+
+        return ex;
     }
     
     public static TException Throws<TException>(Action @delegate, [CallerArgumentExpression(nameof(@delegate))] string? doNotPopulateThisValue = null) where TException : Exception
     {
         return (TException) Throws(typeof(TException), @delegate, doNotPopulateThisValue);
     }
-
-    [DoesNotReturn]
-    public static void Fail(string reason) => TUnit.Assertions.Fail.Test(reason);
+    
+    public static void Fail(string reason)
+    {
+        try
+        {
+            TUnit.Assertions.Fail.Test(reason);
+        }
+        catch (AssertionException e) when (AssertionScope.GetCurrentAssertionScope() is {} assertionScope)
+        {
+            assertionScope.AddException(e);
+        }
+    }
 }
