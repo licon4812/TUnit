@@ -1,5 +1,4 @@
-﻿using System;
-using System.Runtime.InteropServices;
+﻿using System.Runtime.InteropServices;
 using TUnit.Core.Enums;
 
 namespace TUnit.Core;
@@ -27,14 +26,14 @@ namespace TUnit.Core;
 /// {
 ///     // This test will only run on Windows
 /// }
-/// 
+///
 /// // Run on both Windows and Linux
 /// [Test, RunOn(OS.Windows | OS.Linux)]
 /// public void WindowsAndLinuxTest()
 /// {
 ///     // This test will run on Windows and Linux, but not on macOS
 /// }
-/// 
+///
 /// // Run on all supported platforms
 /// [Test, RunOn(OS.Windows | OS.Linux | OS.MacOs)]
 /// public void AllPlatformsTest()
@@ -48,19 +47,25 @@ namespace TUnit.Core;
 public sealed class RunOnAttribute(OS OperatingSystem) : SkipAttribute($"Test is restricted to run on the following operating systems: `{OperatingSystem}`.")
 {
     /// <inheritdoc />
-    public override Task<bool> ShouldSkip(BeforeTestContext context)
+    public override Task<bool> ShouldSkip(TestRegisteredContext context)
     {
-        // Check if the current platform matches any of the allowed operating systems
-        bool shouldRun =
-            (OperatingSystem.HasFlag(OS.Windows) && RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+        if (OperatingSystem.HasFlag(OS.Windows) && RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+        {
+            return Task.FromResult(false);
+        }
 #if NET
-            // Only validate Linux and macOS on .NET 5+ where these OS flags are available
-            || (OperatingSystem.HasFlag(OS.Linux) && RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
-            || (OperatingSystem.HasFlag(OS.MacOs) && RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
-#endif
-            ;
+        // Only validate Linux and macOS on .NET 5+ where these OS flags are available
+        if (OperatingSystem.HasFlag(OS.Linux) && RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
+        {
+            return Task.FromResult(false);
+        }
 
-        // Return true if the test should be skipped (opposite of shouldRun)
-        return Task.FromResult(!shouldRun);
+        if (OperatingSystem.HasFlag(OS.MacOs) && RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
+        {
+            return Task.FromResult(false);
+        }
+#endif
+
+        return Task.FromResult(true);
     }
 }
