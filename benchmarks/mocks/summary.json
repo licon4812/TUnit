@@ -1,0 +1,20 @@
+{
+  "categories": [
+    "Callback",
+    "CombinedWorkflow",
+    "Invocation",
+    "MockCreation",
+    "Setup",
+    "Verification"
+  ],
+  "timestamp": "2026-05-12",
+  "environment": "Ubuntu Latest • .NET SDK 10.0.203",
+  "libraries": [
+    "TUnit.Mocks",
+    "Imposter",
+    "Mockolate",
+    "Moq",
+    "NSubstitute",
+    "FakeItEasy"
+  ]
+}
