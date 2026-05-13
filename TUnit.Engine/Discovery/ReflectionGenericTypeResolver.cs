@@ -1,13 +1,16 @@
-using System.Diagnostics.CodeAnalysis;
+﻿using System.Diagnostics.CodeAnalysis;
 using System.Reflection;
+using System.Runtime.CompilerServices;
 using TUnit.Core;
+using TUnit.Engine.Helpers;
 
 namespace TUnit.Engine.Discovery;
 
 /// <summary>
 /// Handles generic type resolution and instantiation for reflection-based test discovery
 /// </summary>
-[RequiresUnreferencedCode("Reflection-based generic type resolution requires unreferenced code")]
+[RequiresUnreferencedCode("Uses reflection to analyze and instantiate generic types")]
+[RequiresDynamicCode("Uses reflection to analyze and instantiate generic types")]
 internal static class ReflectionGenericTypeResolver
 {
     /// <summary>
@@ -15,6 +18,13 @@ internal static class ReflectionGenericTypeResolver
     /// </summary>
     public static Type[]? DetermineGenericTypeArguments(Type genericTypeDefinition, object?[] dataRow)
     {
+#if NET
+        if (!RuntimeFeature.IsDynamicCodeSupported)
+        {
+            throw new Exception("Using TUnit Reflection mechanisms isn't supported in AOT mode");
+        }
+#endif
+
         var genericParameters = genericTypeDefinition.GetGenericArguments();
 
         // If no data row or empty data, can't determine types
@@ -68,17 +78,26 @@ internal static class ReflectionGenericTypeResolver
     /// <summary>
     /// Extracts generic type information including constraints
     /// </summary>
-    [UnconditionalSuppressMessage("Trimming",
-        "IL2065:Value passed to implicit 'this' parameter of method 'System.Type.GetInterfaces()' can not be statically determined and may not meet 'DynamicallyAccessedMembersAttribute' requirements",
-        Justification = "Reflection mode requires dynamic access")]
     public static GenericTypeInfo? ExtractGenericTypeInfo(Type testClass)
     {
-        if (!testClass.IsGenericTypeDefinition)
+        // Handle both generic type definitions and constructed generic types
+        Type typeToAnalyze;
+        if (testClass.IsGenericTypeDefinition)
+        {
+            typeToAnalyze = testClass;
+        }
+        else if (testClass.IsConstructedGenericType)
+        {
+            // For constructed generic types (like Issue2952GenericBase<int>),
+            // use the generic type definition to extract parameter names and constraints
+            typeToAnalyze = testClass.GetGenericTypeDefinition();
+        }
+        else
         {
             return null;
         }
 
-        var genericParams = testClass.GetGenericArguments();
+        var genericParams = typeToAnalyze.GetGenericArguments();
         var constraints = new GenericParameterConstraints[genericParams.Length];
 
         for (var i = 0; i < genericParams.Length; i++)
@@ -88,7 +107,7 @@ internal static class ReflectionGenericTypeResolver
             {
                 ParameterName = param.Name,
                 BaseTypeConstraint = param.BaseType != typeof(object) ? param.BaseType : null,
-                InterfaceConstraints = param.GetInterfaces(),
+                InterfaceConstraints = AssemblyReferenceCache.GetInterfaces(param),
                 HasDefaultConstructorConstraint = param.GenericParameterAttributes.HasFlag(GenericParameterAttributes.DefaultConstructorConstraint),
                 HasReferenceTypeConstraint = param.GenericParameterAttributes.HasFlag(GenericParameterAttributes.ReferenceTypeConstraint),
                 HasValueTypeConstraint = param.GenericParameterAttributes.HasFlag(GenericParameterAttributes.NotNullableValueTypeConstraint),
@@ -106,9 +125,6 @@ internal static class ReflectionGenericTypeResolver
     /// <summary>
     /// Extracts generic method information including parameter positions
     /// </summary>
-    [UnconditionalSuppressMessage("Trimming",
-        "IL2065:Value passed to implicit 'this' parameter of method 'System.Type.GetInterfaces()' can not be statically determined and may not meet 'DynamicallyAccessedMembersAttribute' requirements",
-        Justification = "Reflection mode requires dynamic access")]
     public static GenericMethodInfo? ExtractGenericMethodInfo(MethodInfo method)
     {
         if (!method.IsGenericMethodDefinition)
@@ -138,7 +154,7 @@ internal static class ReflectionGenericTypeResolver
             {
                 ParameterName = param.Name,
                 BaseTypeConstraint = param.BaseType != typeof(object) ? param.BaseType : null,
-                InterfaceConstraints = param.GetInterfaces(),
+                InterfaceConstraints = AssemblyReferenceCache.GetInterfaces(param),
                 HasDefaultConstructorConstraint = param.GenericParameterAttributes.HasFlag(GenericParameterAttributes.DefaultConstructorConstraint),
                 HasReferenceTypeConstraint = param.GenericParameterAttributes.HasFlag(GenericParameterAttributes.ReferenceTypeConstraint),
                 HasValueTypeConstraint = param.GenericParameterAttributes.HasFlag(GenericParameterAttributes.NotNullableValueTypeConstraint),
@@ -157,10 +173,6 @@ internal static class ReflectionGenericTypeResolver
     /// <summary>
     /// Creates a concrete type from a generic type definition and validates the type arguments
     /// </summary>
-    [UnconditionalSuppressMessage("Trimming", "IL2055:Call to 'System.Type.MakeGenericType' can not be statically analyzed",
-        Justification = "Reflection mode requires dynamic access")]
-    [UnconditionalSuppressMessage("AOT", "IL3050:Calling members annotated with 'RequiresDynamicCodeAttribute' may break functionality when AOT compiling.",
-        Justification = "Reflection mode cannot support AOT")]
     public static Type CreateConcreteType(Type genericTypeDefinition, Type[] typeArguments)
     {
         var genericParams = genericTypeDefinition.GetGenericArguments();

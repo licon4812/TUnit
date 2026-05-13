@@ -1,33 +1,11 @@
-﻿using System.Collections.Immutable;
-using System.Diagnostics.CodeAnalysis;
+﻿using System.Diagnostics.CodeAnalysis;
 using System.Text;
 using Microsoft.CodeAnalysis;
-using TUnit.Analyzers.Extensions;
-using TUnit.Core.SourceGenerator.CodeGenerators.Helpers;
 
 namespace TUnit.Core.SourceGenerator.Extensions;
 
 public static class TypeExtensions
 {
-    private static readonly Dictionary<string, string> ReservedTypeKeywords = new()
-    {
-        { "System.Boolean", "bool" },
-        { "System.Byte", "byte" },
-        { "System.SByte", "sbyte" },
-        { "System.Char", "char" },
-        { "System.Decimal", "decimal" },
-        { "System.Double", "double" },
-        { "System.Single", "float" },
-        { "System.Int32", "int" },
-        { "System.UInt32", "uint" },
-        { "System.Int64", "long" },
-        { "System.UInt64", "ulong" },
-        { "System.Int16", "short" },
-        { "System.UInt16", "ushort" },
-        { "System.Object", "object" },
-        { "System.String", "string" }
-    };
-
     public static string GetMetadataName(this Type type)
     {
         return $"{type.Namespace}.{type.Name}";
@@ -35,32 +13,53 @@ public static class TypeExtensions
 
     public static IEnumerable<ISymbol> GetMembersIncludingBase(this ITypeSymbol namedTypeSymbol, bool reverse = true)
     {
-        var list = new List<ISymbol>();
-
-        var symbol = namedTypeSymbol;
-
-        while (symbol is not null)
+        if (!reverse)
         {
-            if (symbol is IErrorTypeSymbol)
+            // Forward traversal - yield directly without allocations
+            var symbol = namedTypeSymbol;
+            while (symbol is not null && symbol.SpecialType != SpecialType.System_Object)
             {
-                throw new Exception($"ErrorTypeSymbol for {symbol.Name} - Have you added any missing file sources to the compilation?");
+                if (symbol is IErrorTypeSymbol)
+                {
+                    throw new Exception($"ErrorTypeSymbol for {symbol.Name} - Have you added any missing file sources to the compilation?");
+                }
+
+                foreach (var member in symbol.GetMembers())
+                {
+                    yield return member;
+                }
+
+                symbol = symbol.BaseType;
             }
 
-            if (symbol.SpecialType == SpecialType.System_Object)
+            yield break;
+        }
+
+        // Reverse traversal - collect hierarchy, then yield from base to derived
+        // Use stack to collect types (base to derived), then iterate members in forward order
+        var typeStack = new Stack<ITypeSymbol>();
+        var current = namedTypeSymbol;
+
+        while (current is not null && current.SpecialType != SpecialType.System_Object)
+        {
+            if (current is IErrorTypeSymbol)
             {
-                break;
+                throw new Exception($"ErrorTypeSymbol for {current.Name} - Have you added any missing file sources to the compilation?");
             }
 
-            list.AddRange(reverse ? symbol.GetMembers().Reverse() : symbol.GetMembers());
-            symbol = symbol.BaseType;
+            typeStack.Push(current);
+            current = current.BaseType;
         }
 
-        if (reverse)
+        // Yield members from base to derived
+        while (typeStack.Count > 0)
         {
-            list.Reverse();
+            var type = typeStack.Pop();
+            foreach (var member in type.GetMembers())
+            {
+                yield return member;
+            }
         }
-
-        return list;
     }
 
     public static IEnumerable<INamedTypeSymbol> GetSelfAndBaseTypes(this INamedTypeSymbol namedTypeSymbol)
@@ -109,9 +108,12 @@ public static class TypeExtensions
             ? [(INamedTypeSymbol) namedTypeSymbol, .. namedTypeSymbol.AllInterfaces]
             : namedTypeSymbol.AllInterfaces.AsEnumerable();
 
+        // Cache the special type lookup to avoid repeated calls
+        var enumerableT = compilation.GetSpecialType(SpecialType.System_Collections_Generic_IEnumerable_T);
+
         foreach (var enumerable in interfaces
                      .Where(x => x.IsGenericType)
-                     .Where(x => SymbolEqualityComparer.Default.Equals(x.OriginalDefinition, compilation.GetSpecialType(SpecialType.System_Collections_Generic_IEnumerable_T))))
+                     .Where(x => SymbolEqualityComparer.Default.Equals(x.OriginalDefinition, enumerableT)))
         {
             innerType = enumerable.TypeArguments[0];
             return true;
@@ -121,107 +123,63 @@ public static class TypeExtensions
         return false;
     }
 
-    public static string GloballyQualifiedOrFallback(this ITypeSymbol? typeSymbol, TypedConstant? typedConstant = null)
-    {
-        if (typeSymbol is not null and not ITypeParameterSymbol)
-        {
-            return typeSymbol.GloballyQualified();
-        }
-
-        if (typedConstant is not null)
-        {
-            return TypedConstantParser.GetFullyQualifiedTypeNameFromTypedConstantValue(typedConstant.Value);
-        }
-
-        return "var";
-    }
-
-    public static bool EnumerableGenericTypeIs(this ITypeSymbol enumerable, GeneratorAttributeSyntaxContext context,
-        ImmutableArray<ITypeSymbol> parameterTypes, [NotNullWhen(true)] out ITypeSymbol? enumerableInnerType)
-    {
-        if (parameterTypes.IsDefaultOrEmpty)
-        {
-            enumerableInnerType = null;
-            return false;
-        }
-
-        var genericEnumerableType =
-            context.SemanticModel.Compilation.GetSpecialType(SpecialType.System_Collections_Generic_IEnumerable_T).ConstructUnboundGenericType();
-
-        if (enumerable is INamedTypeSymbol { IsGenericType: true } namedTypeSymbol && namedTypeSymbol
-                .ConstructUnboundGenericType().Equals(genericEnumerableType, SymbolEqualityComparer.Default))
-        {
-            enumerableInnerType = namedTypeSymbol.TypeArguments.First();
-        }
-        else
-        {
-            var enumerableInterface = enumerable.AllInterfaces.FirstOrDefault(x =>
-                x.IsGenericType && x.ConstructUnboundGenericType()
-                    .Equals(genericEnumerableType, SymbolEqualityComparer.Default));
-
-            enumerableInnerType = enumerableInterface?.TypeArguments.FirstOrDefault();
-        }
-
-        if (enumerableInnerType is null)
-        {
-            enumerableInnerType = null;
-            return false;
-        }
-
-        var firstParameterType = parameterTypes.FirstOrDefault();
-
-        if (context.SemanticModel.Compilation.HasImplicitConversionOrGenericParameter(enumerableInnerType, firstParameterType))
-        {
-            return true;
-        }
-
-        if (!enumerableInnerType.IsTupleType && firstParameterType is INamedTypeSymbol { IsGenericType: true })
-        {
-            return true;
-        }
-
-        if (enumerableInnerType.IsTupleType && enumerableInnerType is INamedTypeSymbol namedInnerType)
-        {
-            var tupleTypes = namedInnerType.TupleElements.Select(x => x.Type).ToImmutableArray();
-
-            for (var index = 0; index < tupleTypes.Length; index++)
-            {
-                var tupleType = tupleTypes.ElementAtOrDefault(index);
-                var parameterType = parameterTypes.ElementAtOrDefault(index);
-
-                if (parameterType?.IsGenericDefinition() == true)
-                {
-                    continue;
-                }
-
-                if (!context.SemanticModel.Compilation.HasImplicitConversionOrGenericParameter(tupleType, parameterType))
-                {
-                    return false;
-                }
-            }
-
-            return true;
-        }
-
-        return false;
-    }
-
     public static string GloballyQualified(this ISymbol typeSymbol)
     {
-        // Only generate open generic form for types with unresolved type parameters
-        // This ensures we get BaseClass<> for generic definitions but List<int> for constructed types
-        if(typeSymbol is INamedTypeSymbol { IsGenericType: true } namedTypeSymbol && 
-           namedTypeSymbol.TypeArguments.Any(t => t.TypeKind == TypeKind.TypeParameter))
+        // Handle open generic types where type arguments are type parameters
+        // This prevents invalid C# like List<T>, Dictionary<TKey, TValue>, T? where type parameters are undefined
+        if (typeSymbol is INamedTypeSymbol { IsGenericType: true, Arity: > 0 } namedTypeSymbol)
         {
-            var typeBuilder = new StringBuilder(typeSymbol.ToDisplayString(DisplayFormats.FullyQualifiedNonGenericWithGlobalPrefix));
-            typeBuilder.Append('<');
-            typeBuilder.Append(new string(',', namedTypeSymbol.TypeArguments.Length - 1));
-            typeBuilder.Append('>');
+            // Check if this is an unbound generic type or has type parameter arguments
+            // Use multiple detection methods for robustness across Roslyn versions
+            var hasTypeParameters = namedTypeSymbol.TypeArguments.Any(t => t.TypeKind == TypeKind.TypeParameter);
+            var hasTypeParameterSymbols = namedTypeSymbol.TypeArguments.OfType<ITypeParameterSymbol>().Any();
+            var isUnboundGeneric = namedTypeSymbol.IsUnboundGenericType;
+            // Also detect generic type definitions by checking if type equals its OriginalDefinition
+            var isGenericTypeDefinition = SymbolEqualityComparer.Default.Equals(namedTypeSymbol, namedTypeSymbol.OriginalDefinition);
 
-            return typeBuilder.ToString();
+            if (hasTypeParameters || hasTypeParameterSymbols || isUnboundGeneric || isGenericTypeDefinition)
+            {
+                // Special case for System.Nullable<> - Roslyn displays it as "T?" even for open generic
+                if (namedTypeSymbol.SpecialType == SpecialType.System_Nullable_T ||
+                    namedTypeSymbol.ConstructedFrom?.SpecialType == SpecialType.System_Nullable_T)
+                {
+                    return "global::System.Nullable<>";
+                }
+
+                // General case for other open generic types
+                var typeBuilder = new StringBuilder(typeSymbol.ToDisplayString(DisplayFormats.FullyQualifiedNonGenericWithGlobalPrefix));
+                typeBuilder.Append('<');
+                typeBuilder.Append(new string(',', namedTypeSymbol.TypeArguments.Length - 1));
+                typeBuilder.Append('>');
+
+                return typeBuilder.ToString();
+            }
         }
 
         return typeSymbol.ToDisplayString(DisplayFormats.FullyQualifiedGenericWithGlobalPrefix);
+    }
+
+    /// <summary>
+    /// Determines if a type is compiler-generated (e.g., async state machines, lambda closures).
+    /// These types typically contain angle brackets in their names and cannot be represented in source code.
+    /// </summary>
+    public static bool IsCompilerGeneratedType(this ITypeSymbol? typeSymbol)
+    {
+        if (typeSymbol == null)
+        {
+            return false;
+        }
+
+        // Check the type name directly, not the display string
+        // Compiler-generated types have names that start with '<' or contain '<>'
+        // Examples: <BaseAsyncTest>d__0, <>c__DisplayClass0_0, <>f__AnonymousType0
+        var typeName = typeSymbol.Name;
+
+        // Compiler-generated types typically:
+        // 1. Start with '<' (like <MethodName>d__0 for async state machines)
+        // 2. Contain '<>' (like <>c for compiler-generated classes)
+        // This won't match normal generic types like List<T> because those don't have '<' in the type name itself
+        return typeName.StartsWith("<") || typeName.Contains("<>");
     }
 
     public static string GloballyQualifiedNonGeneric(this ISymbol typeSymbol) =>
@@ -286,5 +244,28 @@ public static class TypeExtensions
 
         innerType = null;
         return false;
+    }
+
+    /// <summary>
+    /// Gets the nested class name with '+' separator (matching .NET Type.FullName convention).
+    /// For example: OuterClass+InnerClass
+    /// </summary>
+    public static string GetNestedClassName(this INamedTypeSymbol typeSymbol)
+    {
+        var typeHierarchy = new List<string>();
+        var currentType = typeSymbol;
+
+        // Walk up the containing type chain
+        while (currentType != null)
+        {
+            typeHierarchy.Add(currentType.Name);
+            currentType = currentType.ContainingType;
+        }
+
+        // Reverse to get outer-to-inner order
+        typeHierarchy.Reverse();
+
+        // Join with '+' separator (matching .NET Type.FullName convention for nested types)
+        return string.Join('+', typeHierarchy);
     }
 }

@@ -1,12 +1,13 @@
-using System.Collections.Concurrent;
+﻿using System.Collections.Concurrent;
 using System.Diagnostics.CodeAnalysis;
+using System.Linq;
 using System.Linq.Expressions;
 using System.Reflection;
-using Microsoft.Testing.Platform.Extensions.Messages;
 using TUnit.Core;
 using TUnit.Core.Interfaces;
 using TUnit.Engine.Building;
-using TUnit.Engine.Scheduling;
+using TUnit.Engine.Helpers;
+using TUnit.Engine.Interfaces;
 
 namespace TUnit.Engine.Services;
 
@@ -17,27 +18,33 @@ internal sealed class TestRegistry : ITestRegistry
 {
     private readonly ConcurrentQueue<PendingDynamicTest> _pendingTests = new();
     private readonly TestBuilderPipeline? _testBuilderPipeline;
-    private readonly HookOrchestratingTestExecutorAdapter _hookOrchestratingTestExecutorAdapter;
+    private readonly ITestCoordinator _testCoordinator;
+    private readonly IDynamicTestQueue _dynamicTestQueue;
     private readonly CancellationToken _sessionCancellationToken;
     private readonly string? _sessionId;
 
-
     public TestRegistry(TestBuilderPipeline testBuilderPipeline,
-        HookOrchestratingTestExecutorAdapter hookOrchestratingTestExecutorAdapter,
+        ITestCoordinator testCoordinator,
+        IDynamicTestQueue dynamicTestQueue,
         string sessionId,
         CancellationToken sessionCancellationToken)
     {
         _testBuilderPipeline = testBuilderPipeline;
-        _hookOrchestratingTestExecutorAdapter = hookOrchestratingTestExecutorAdapter;
+        _testCoordinator = testCoordinator;
+        _dynamicTestQueue = dynamicTestQueue;
         _sessionId = sessionId;
         _sessionCancellationToken = sessionCancellationToken;
     }
+
+    [RequiresUnreferencedCode("Adding dynamic tests requires reflection which is not supported in native AOT scenarios.")]
     public async Task AddDynamicTest<[DynamicallyAccessedMembers(
         DynamicallyAccessedMemberTypes.PublicConstructors
         | DynamicallyAccessedMemberTypes.NonPublicConstructors
         | DynamicallyAccessedMemberTypes.PublicProperties
         | DynamicallyAccessedMemberTypes.PublicMethods
-        | DynamicallyAccessedMemberTypes.NonPublicMethods)] T>(TestContext context, DynamicTestInstance<T> dynamicTest) where T : class
+        | DynamicallyAccessedMemberTypes.NonPublicMethods
+        | DynamicallyAccessedMemberTypes.PublicFields
+        | DynamicallyAccessedMemberTypes.NonPublicFields)] T>(TestContext context, DynamicTest<T> dynamicTest) where T : class
     {
         // Create a dynamic test discovery result
         var discoveryResult = new DynamicDiscoveryResult
@@ -46,7 +53,9 @@ internal sealed class TestRegistry : ITestRegistry
             TestClassArguments = dynamicTest.TestClassArguments,
             TestMethodArguments = dynamicTest.TestMethodArguments,
             TestMethod = dynamicTest.TestMethod,
-            Attributes = dynamicTest.Attributes
+            Attributes = dynamicTest.Attributes,
+            CreatorFilePath = dynamicTest.CreatorFilePath,
+            CreatorLineNumber = dynamicTest.CreatorLineNumber
         };
 
         // Queue the test for processing
@@ -61,6 +70,7 @@ internal sealed class TestRegistry : ITestRegistry
         await ProcessPendingDynamicTests();
     }
 
+    [RequiresUnreferencedCode("Processing dynamic tests requires reflection which is not supported in native AOT scenarios.")]
     private async Task ProcessPendingDynamicTests()
     {
         var testsToProcess = new List<PendingDynamicTest>();
@@ -81,79 +91,219 @@ internal sealed class TestRegistry : ITestRegistry
         foreach (var pendingTest in testsToProcess)
         {
             var result = pendingTest.DiscoveryResult;
-            var metadata = await CreateMetadataFromDynamicDiscoveryResult(result);
+            var metadata = CreateMetadataFromDynamicDiscoveryResult(result);
             testMetadataList.Add(metadata);
         }
 
-        // Use the existing TestBuilderPipeline to build the tests
-        // This ensures all the same logic is applied (repeat, retry, context creation, etc.)
-        var builtTests = await _testBuilderPipeline!.BuildTestsFromMetadataAsync(testMetadataList);
+        // These are dynamic tests registered after discovery, so not in execution mode with a filter
+        var buildingContext = new Building.TestBuildingContext(IsForExecution: false, Filter: null);
+        var builtTests = await _testBuilderPipeline!.BuildTestsFromMetadataAsync(testMetadataList, buildingContext);
 
-        // Then execute each test through the single test executor
         foreach (var test in builtTests)
         {
-            // The SingleTestExecutor will handle all execution-related message publishing
-            await _hookOrchestratingTestExecutorAdapter.ExecuteTestAsync(test, _sessionCancellationToken);
+            _dynamicTestQueue.Enqueue(test);
         }
     }
 
-    private async Task<TestMetadata> CreateMetadataFromDynamicDiscoveryResult(DynamicDiscoveryResult result)
+    [RequiresUnreferencedCode("Creating test variants requires reflection which is not supported in native AOT scenarios.")]
+    [UnconditionalSuppressMessage("Trimming",
+        "IL2026:Members annotated with 'RequiresUnreferencedCodeAttribute' require dynamic access",
+        Justification = "Dynamic test variants require reflection")]
+    [UnconditionalSuppressMessage("Trimming",
+        "IL2067:Target parameter argument does not satisfy 'DynamicallyAccessedMembersAttribute' in call",
+        Justification = "Dynamic test variants require reflection")]
+    [UnconditionalSuppressMessage("AOT",
+        "IL3050:Calling members annotated with 'RequiresDynamicCodeAttribute' may break functionality when AOT compiling",
+        Justification = "Dynamic test variants require runtime compilation")]
+    public async Task<TestVariantInfo> CreateTestVariant(
+        TestContext currentContext,
+        object?[]? methodArguments,
+        object?[]? classArguments,
+        IReadOnlyDictionary<string, object?>? properties,
+        TUnit.Core.Enums.TestRelationship relationship,
+        string? displayName)
+    {
+        var testDetails = currentContext.Metadata.TestDetails;
+        var testClassType = testDetails.ClassType;
+        var variantMethodArguments = methodArguments ?? testDetails.TestMethodArguments;
+        var variantClassArguments = classArguments ?? testDetails.TestClassArguments;
+
+        var methodMetadata = testDetails.MethodMetadata;
+
+        // Validate argument count matches method parameter count
+        if (variantMethodArguments.Length != methodMetadata.Parameters.Length)
+        {
+            throw new ArgumentException(
+                $"Method '{methodMetadata.Name}' expects {methodMetadata.Parameters.Length} argument(s) but {variantMethodArguments.Length} were provided.",
+                nameof(methodArguments));
+        }
+
+        var parameterTypes = methodMetadata.Parameters.Select(p => p.Type).ToArray();
+        var methodInfo = methodMetadata.Type.GetMethod(
+            methodMetadata.Name,
+            BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static,
+            null,
+            parameterTypes,
+            null);
+
+        if (methodInfo == null)
+        {
+            throw new InvalidOperationException($"Cannot create test variant: method '{methodMetadata.Name}' not found");
+        }
+
+        var genericAddDynamicTestMethod = typeof(TestRegistry)
+            .GetMethod(nameof(CreateTestVariantInternal), BindingFlags.NonPublic | BindingFlags.Instance)
+            ?.MakeGenericMethod(testClassType);
+
+        if (genericAddDynamicTestMethod == null)
+        {
+            throw new InvalidOperationException("Failed to resolve CreateTestVariantInternal method");
+        }
+
+        return await ((Task<TestVariantInfo>)genericAddDynamicTestMethod.Invoke(this,
+            [currentContext, methodInfo, variantMethodArguments, variantClassArguments, properties, relationship, displayName])!);
+    }
+
+    [RequiresUnreferencedCode("Creating test variants requires reflection which is not supported in native AOT scenarios.")]
+    [RequiresDynamicCode("Creating test variants builds Expression trees and may instantiate generic helpers at runtime which is not supported in native AOT scenarios.")]
+    private async Task<TestVariantInfo> CreateTestVariantInternal<[DynamicallyAccessedMembers(
+        DynamicallyAccessedMemberTypes.PublicConstructors
+        | DynamicallyAccessedMemberTypes.NonPublicConstructors
+        | DynamicallyAccessedMemberTypes.PublicProperties
+        | DynamicallyAccessedMemberTypes.PublicMethods
+        | DynamicallyAccessedMemberTypes.NonPublicMethods
+        | DynamicallyAccessedMemberTypes.PublicFields
+        | DynamicallyAccessedMemberTypes.NonPublicFields)] T>(
+        TestContext currentContext,
+        MethodInfo methodInfo,
+        object?[] variantMethodArguments,
+        object?[] classArguments,
+        IReadOnlyDictionary<string, object?>? properties,
+        TUnit.Core.Enums.TestRelationship relationship,
+        string? displayName) where T : class
+    {
+        var parameter = Expression.Parameter(typeof(T), "instance");
+        var methodParameters = methodInfo.GetParameters();
+        var argumentExpressions = new Expression[methodParameters.Length];
+
+        for (int i = 0; i < methodParameters.Length; i++)
+        {
+            argumentExpressions[i] = Expression.Constant(variantMethodArguments[i], methodParameters[i].ParameterType);
+        }
+
+        var methodCall = Expression.Call(parameter, methodInfo, argumentExpressions);
+
+        Expression body;
+        if (methodInfo.ReturnType == typeof(Task))
+        {
+            body = methodCall;
+        }
+        else if (methodInfo.ReturnType == typeof(void))
+        {
+            body = Expression.Block(methodCall, Expression.Constant(Task.CompletedTask));
+        }
+        else if (methodInfo.ReturnType.IsGenericType &&
+                 methodInfo.ReturnType.GetGenericTypeDefinition() == typeof(Task<>))
+        {
+            body = Expression.Convert(methodCall, typeof(Task));
+        }
+        else if (methodInfo.ReturnType == typeof(ValueTask))
+        {
+            // Bridge through ValueTaskBridge so synchronously-completed ValueTasks avoid the
+            // Task allocation that .AsTask() would force.
+            body = Expression.Call(ValueTaskBridge.ToTaskNonGenericMethod, methodCall);
+        }
+        else if (methodInfo.ReturnType.IsGenericType &&
+                 methodInfo.ReturnType.GetGenericTypeDefinition() == typeof(ValueTask<>))
+        {
+            // ValueTask<T> → Task via the generic helper. Helper returns Task.FromResult for sync
+            // completion (runtime caches common results) instead of allocating a new Task.
+            var toTaskGeneric = ValueTaskBridge.ToTaskGenericMethodDefinition
+                .MakeGenericMethod(methodInfo.ReturnType.GenericTypeArguments[0]);
+            body = Expression.Convert(Expression.Call(toTaskGeneric, methodCall), typeof(Task));
+        }
+        else
+        {
+            body = Expression.Block(methodCall, Expression.Constant(Task.CompletedTask));
+        }
+
+        var lambda = Expression.Lambda<Func<T, Task>>(body, parameter);
+        var attributes = new List<Attribute>(currentContext.Metadata.TestDetails.GetAllAttributes());
+
+        var discoveryResult = new DynamicDiscoveryResult
+        {
+            TestClassType = typeof(T),
+            TestClassArguments = classArguments,
+            TestMethodArguments = variantMethodArguments,
+            TestMethod = lambda,
+            Attributes = attributes,
+            CreatorFilePath = currentContext.Metadata.TestDetails.TestFilePath,
+            CreatorLineNumber = currentContext.Metadata.TestDetails.TestLineNumber,
+            ParentTestId = currentContext.Metadata.TestDetails.TestId,
+            Relationship = relationship,
+            Properties = properties,
+            DisplayName = displayName
+        };
+
+        // Process the variant inline (bypassing _pendingTests queue and ProcessPendingDynamicTests)
+        // so we can capture the built test and return TestVariantInfo to the caller.
+        // AddDynamicTest uses the queue-based path instead. If batching/ordering logic is added
+        // to ProcessPendingDynamicTests, consider whether it should also apply here.
+        if (_sessionId == null || _testBuilderPipeline == null)
+        {
+            throw new InvalidOperationException("Cannot create test variant: TestRegistry is not fully initialized");
+        }
+
+        var metadata = CreateMetadataFromDynamicDiscoveryResult(discoveryResult);
+
+        // Use IsForExecution: false to bypass filtering — this variant was explicitly requested
+        // by the test and should always be registered, regardless of any active test filter.
+        var buildingContext = new Building.TestBuildingContext(IsForExecution: false, Filter: null);
+        var builtTests = await _testBuilderPipeline.BuildTestsFromMetadataAsync([metadata], buildingContext);
+
+        var builtTest = builtTests.FirstOrDefault()
+            ?? throw new InvalidOperationException("Failed to build test variant");
+
+        _dynamicTestQueue.Enqueue(builtTest);
+
+        return new TestVariantInfo(builtTest.TestId, builtTest.Context.GetDisplayName());
+    }
+
+    [RequiresUnreferencedCode("Dynamic test metadata creation requires reflection which is not supported in native AOT scenarios.")]
+    private TestMetadata CreateMetadataFromDynamicDiscoveryResult(DynamicDiscoveryResult result)
     {
         if (result.TestClassType == null || result.TestMethod == null)
         {
             throw new InvalidOperationException("Dynamic test discovery result must have a test class type and method");
         }
 
-        // Extract method info from the expression
-        MethodInfo? methodInfo = null;
-        var lambdaExpression = result.TestMethod as LambdaExpression;
-        if (lambdaExpression?.Body is MethodCallExpression methodCall)
-        {
-            methodInfo = methodCall.Method;
-        }
-        else if (lambdaExpression?.Body is UnaryExpression { Operand: MethodCallExpression unaryMethodCall })
-        {
-            methodInfo = unaryMethodCall.Method;
-        }
+        var methodInfo = ExpressionHelper.ExtractMethodInfo(result.TestMethod);
 
-        if (methodInfo == null)
+        return new DynamicTestMetadata(result)
         {
-            throw new InvalidOperationException("Could not extract method info from dynamic test expression");
-        }
-
-        var testName = methodInfo.Name;
-
-        return await Task.FromResult<TestMetadata>(new RuntimeDynamicTestMetadata(result.TestClassType, methodInfo, result)
-        {
-            TestName = testName,
+            TestName = methodInfo.Name,
             TestClassType = result.TestClassType,
             TestMethodName = methodInfo.Name,
-            IsSkipped = result.Attributes.OfType<SkipAttribute>().Any(),
-            SkipReason = result.Attributes.OfType<SkipAttribute>().FirstOrDefault()?.Reason,
-            TimeoutMs = (int?)result.Attributes.OfType<TimeoutAttribute>().FirstOrDefault()?.Timeout.TotalMilliseconds,
-            RetryCount = result.Attributes.OfType<RetryAttribute>().FirstOrDefault()?.Times ?? 0,
-            RepeatCount = result.Attributes.OfType<RepeatAttribute>().FirstOrDefault()?.Times ?? 0,
-            CanRunInParallel = !result.Attributes.OfType<NotInParallelAttribute>().Any(),
-            Dependencies = result.Attributes.OfType<DependsOnAttribute>().Select(a => a.ToTestDependency()).ToArray(),
+            Dependencies = result.Attributes.OfType<DependsOnAttribute>()
+                .Select(x => x.ToTestDependency())
+                .ToArray(),
             DataSources = [],
             ClassDataSources = [],
             PropertyDataSources = [],
             InstanceFactory = CreateRuntimeInstanceFactory(result.TestClassType, result.TestClassArguments)!,
             TestInvoker = CreateRuntimeTestInvoker(result),
-            ParameterCount = result.TestMethodArguments?.Length ?? 0,
-            ParameterTypes = methodInfo.GetParameters().Select(p => p.ParameterType).ToArray(),
-            TestMethodParameterTypes = methodInfo.GetParameters().Select(p => p.ParameterType.FullName ?? p.ParameterType.Name).ToArray(),
-            FilePath = null,
-            LineNumber = null,
+            FilePath = result.CreatorFilePath ?? "Unknown",
+            LineNumber = result.CreatorLineNumber ?? 0,
             MethodMetadata = ReflectionMetadataBuilder.CreateMethodMetadata(result.TestClassType, methodInfo),
             GenericTypeInfo = null,
             GenericMethodInfo = null,
             GenericMethodTypeArguments = null,
             AttributeFactory = () => result.Attributes.ToArray(),
-            PropertyInjections = PropertyInjector.DiscoverInjectableProperties(result.TestClassType)
-        });
+            PropertyInjections = PropertySourceRegistry.DiscoverInjectableProperties(result.TestClassType)
+        };
     }
 
+    [RequiresUnreferencedCode("Dynamic test instance creation requires Activator.CreateInstance which is not supported in native AOT scenarios.")]
     [UnconditionalSuppressMessage("Trimming",
         "IL2067:Target parameter argument does not satisfy 'DynamicallyAccessedMembersAttribute' in call",
         Justification = "Dynamic tests require reflection")]
@@ -174,26 +324,24 @@ internal sealed class TestRegistry : ITestRegistry
         };
     }
 
+    [RequiresUnreferencedCode("Dynamic test invocation requires LambdaExpression.Compile() which is not supported in native AOT scenarios.")]
     private static Func<object, object?[], Task> CreateRuntimeTestInvoker(DynamicDiscoveryResult result)
     {
+        if (result.TestMethod == null)
+        {
+            throw new InvalidOperationException("Dynamic test method expression is null");
+        }
+
+        var lambdaExpression = result.TestMethod as LambdaExpression
+            ?? throw new InvalidOperationException("Dynamic test method must be a lambda expression");
+
+        var compiledExpression = lambdaExpression.Compile();
+        var invokeMethod = compiledExpression.GetType().GetMethod("Invoke")!;
+
         return async (instance, args) =>
         {
-            if (result.TestMethod == null)
-            {
-                throw new InvalidOperationException("Dynamic test method expression is null");
-            }
-
-            var lambdaExpression = result.TestMethod as LambdaExpression;
-            if (lambdaExpression == null)
-            {
-                throw new InvalidOperationException("Dynamic test method must be a lambda expression");
-            }
-
-            var compiledExpression = lambdaExpression.Compile();
             var testInstance = instance ?? throw new InvalidOperationException("Test instance is null");
-
-            var invokeMethod = compiledExpression.GetType().GetMethod("Invoke")!;
-            var invokeResult = invokeMethod.Invoke(compiledExpression, new[] { testInstance });
+            var invokeResult = invokeMethod.Invoke(compiledExpression, [testInstance]);
 
             if (invokeResult is Task task)
             {
@@ -213,61 +361,4 @@ internal sealed class TestRegistry : ITestRegistry
         public required Type TestClassType { get; init; }
     }
 
-
-    private sealed class RuntimeDynamicTestMetadata : TestMetadata, IDynamicTestMetadata
-    {
-        private readonly DynamicDiscoveryResult _dynamicResult;
-        private readonly Type _testClass;
-        private readonly MethodInfo _testMethod;
-
-        public RuntimeDynamicTestMetadata(Type testClass, MethodInfo testMethod, DynamicDiscoveryResult dynamicResult)
-        {
-            _testClass = testClass;
-            _testMethod = testMethod;
-            _dynamicResult = dynamicResult;
-        }
-
-        public override Func<ExecutableTestCreationContext, TestMetadata, AbstractExecutableTest> CreateExecutableTestFactory
-        {
-            get => (context, metadata) =>
-            {
-                // For dynamic tests, we need to use the specific arguments from the dynamic result
-                var modifiedContext = new ExecutableTestCreationContext
-                {
-                    TestId = context.TestId,
-                    DisplayName = context.DisplayName,
-                    Arguments = _dynamicResult.TestMethodArguments ?? context.Arguments,
-                    ClassArguments = _dynamicResult.TestClassArguments ?? context.ClassArguments,
-                    Context = context.Context
-                };
-
-                // Create instance and test invoker for the dynamic test
-                Func<TestContext, Task<object>> createInstance = (TestContext testContext) =>
-                {
-                    var instance = metadata.InstanceFactory(Type.EmptyTypes, modifiedContext.ClassArguments);
-
-                    // Handle property injections
-                    foreach (var propertyInjection in metadata.PropertyInjections)
-                    {
-                        var value = propertyInjection.ValueFactory();
-                        propertyInjection.Setter(instance, value);
-                    }
-
-                    return Task.FromResult(instance);
-                };
-
-                var invokeTest = metadata.TestInvoker ?? throw new InvalidOperationException("Test invoker is null");
-
-                return new ExecutableTest(createInstance,
-                    async (instance, args, context, ct) => await invokeTest(instance, args))
-                {
-                    TestId = modifiedContext.TestId,
-                    Metadata = metadata,
-                    Arguments = modifiedContext.Arguments,
-                    ClassArguments = modifiedContext.ClassArguments,
-                    Context = modifiedContext.Context
-                };
-            };
-        }
-    }
 }

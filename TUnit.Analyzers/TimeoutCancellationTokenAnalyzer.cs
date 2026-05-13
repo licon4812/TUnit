@@ -9,7 +9,9 @@ namespace TUnit.Analyzers;
 public class TimeoutCancellationTokenAnalyzer : ConcurrentDiagnosticAnalyzer
 {
     public override ImmutableArray<DiagnosticDescriptor> SupportedDiagnostics { get; } =
-        ImmutableArray.Create(Rules.MissingTimeoutCancellationTokenAttributes);
+        ImmutableArray.Create(
+            Rules.MissingTimeoutCancellationTokenAttributes,
+            Rules.CancellationTokenMustBeLastParameter);
 
     protected override void InitializeInternal(AnalysisContext context)
     {
@@ -19,6 +21,12 @@ public class TimeoutCancellationTokenAnalyzer : ConcurrentDiagnosticAnalyzer
     private void AnalyzeSymbol(SymbolAnalysisContext context)
     {
         if (context.Symbol is not IMethodSymbol methodSymbol)
+        {
+            return;
+        }
+
+        if (!methodSymbol.IsTestMethod(context.Compilation) &&
+            !methodSymbol.IsHookMethod(context.Compilation, out _, out _, out _))
         {
             return;
         }
@@ -45,14 +53,34 @@ public class TimeoutCancellationTokenAnalyzer : ConcurrentDiagnosticAnalyzer
             return;
         }
 
-        var lastParameter = parameters.Last();
+        var cancellationTokenType = context.Compilation.GetTypeByMetadataName(typeof(CancellationToken).FullName!);
 
-        if (!SymbolEqualityComparer.Default.Equals(lastParameter.Type,
-                context.Compilation.GetTypeByMetadataName(typeof(CancellationToken).FullName!)))
+        var cancellationTokenIndex = -1;
+        for (var i = 0; i < parameters.Length; i++)
         {
+            if (SymbolEqualityComparer.Default.Equals(parameters[i].Type, cancellationTokenType))
+            {
+                cancellationTokenIndex = i;
+                break;
+            }
+        }
+
+        var lastParameter = parameters[parameters.Length - 1];
+
+        if (cancellationTokenIndex == -1)
+        {
+            // CancellationToken is not present at all
             context.ReportDiagnostic(
                 Diagnostic.Create(Rules.MissingTimeoutCancellationTokenAttributes,
-                    context.Symbol.Locations.FirstOrDefault())
+                    lastParameter.Locations.FirstOrDefault() ?? context.Symbol.Locations.FirstOrDefault())
+            );
+        }
+        else if (cancellationTokenIndex != parameters.Length - 1)
+        {
+            // CancellationToken exists but is not the last parameter
+            context.ReportDiagnostic(
+                Diagnostic.Create(Rules.CancellationTokenMustBeLastParameter,
+                    parameters[cancellationTokenIndex].Locations.FirstOrDefault() ?? context.Symbol.Locations.FirstOrDefault())
             );
         }
     }

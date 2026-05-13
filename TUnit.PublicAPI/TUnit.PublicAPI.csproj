@@ -1,22 +1,56 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
 
+    <PropertyGroup>
+        <!-- Multi-target so public API snapshots cover every supported consumer TFM. -->
+        <TargetFrameworks>net472;net8.0;net9.0;net10.0</TargetFrameworks>
+    </PropertyGroup>
+
   <Import Project="..\TestProject.props" />
-    
+
     <PropertyGroup>
         <Configuration>Release</Configuration>
     </PropertyGroup>
 
+    <!-- Local-only: bypass GitVersion (which can fail on some local repo states) and pin the
+         assembly version so strong-named TUnit.Core loads cleanly. CI keeps GitVersion-driven
+         versioning because GITHUB_ACTIONS=true. -->
+    <PropertyGroup Condition="'$(GITHUB_ACTIONS)' != 'true'">
+        <DisableGitVersionTask>true</DisableGitVersionTask>
+        <GenerateGitVersionInformation>false</GenerateGitVersionInformation>
+        <_EnableLocalGitVersion>false</_EnableLocalGitVersion>
+        <AssemblyVersion>99.99.99.0</AssemblyVersion>
+        <FileVersion>99.99.99.0</FileVersion>
+        <Version>99.99.99</Version>
+    </PropertyGroup>
+
     <ItemGroup>
+      <PackageReference Include="Microsoft.Testing.Extensions.HangDump" />
       <PackageReference Include="PublicApiGenerator" />
       <PackageReference Include="Sourcy.DotNet">
         <PrivateAssets>all</PrivateAssets>
         <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
       </PackageReference>
       <PackageReference Include="Verify" />
+      <PackageReference Include="Verify.TUnit" />
     </ItemGroup>
 
     <ItemGroup>
       <ProjectReference Include="..\TUnit.Playwright\TUnit.Playwright.csproj" />
+      <ProjectReference Include="..\TUnit.Assertions.Should\TUnit.Assertions.Should.csproj" />
+    </ItemGroup>
+
+    <ItemGroup Condition="'$(TargetFramework)' != 'net472'">
+      <ProjectReference Include="..\TUnit.OpenTelemetry\TUnit.OpenTelemetry.csproj" />
+    </ItemGroup>
+
+    <!-- Propagate the GitVersion-disable + pinned-version properties to every transitive
+         ProjectReference build (e.g. TUnit.Core, TUnit.Assertions). MSBuild flows
+         AdditionalProperties as global properties for the referenced build, and globals
+         then carry on to its own ProjectReferences. Skipped under GitHub Actions where
+         the workflow drives versioning explicitly. -->
+    <ItemGroup Condition="'$(GITHUB_ACTIONS)' != 'true'">
+      <ProjectReference Update="@(ProjectReference)"
+                        AdditionalProperties="DisableGitVersionTask=true;GenerateGitVersionInformation=false;_EnableLocalGitVersion=false;AssemblyVersion=99.99.99.0;FileVersion=99.99.99.0;Version=99.99.99" />
     </ItemGroup>
 
     <Import Project="..\TestProject.targets" />

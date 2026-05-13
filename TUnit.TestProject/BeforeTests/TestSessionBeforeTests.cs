@@ -11,12 +11,15 @@ public class TestSessionBeforeHooks
     [BeforeEvery(TestSession)]
     public static async Task BeforeEveryTestSession(TestSessionContext context)
     {
-        await FilePolyfill.WriteAllTextAsync($"TestSessionBeforeTests{Guid.NewGuid():N}.txt", $"{context.AllTests.Count()} tests in session");
+        await File.WriteAllTextAsync($"TestSessionBeforeTests{Guid.NewGuid():N}.txt", $"{context.AllTests.Count()} tests in session");
 
         var test = context.AllTests.FirstOrDefault(x =>
-            x.TestDetails.TestName == nameof(TestSessionBeforeTests.EnsureBeforeEveryTestSessionHit));
+            x.Metadata.TestDetails.TestName == nameof(TestSessionBeforeTests.EnsureBeforeEveryTestSessionHit));
 
-        test?.ObjectBag.Add("BeforeEveryTestSession", true);
+        if (test != null)
+        {
+            test.StateBag.Items["BeforeEveryTestSession"] = true;
+        }
     }
 }
 
@@ -25,6 +28,6 @@ public class TestSessionBeforeTests
     [Test]
     public async Task EnsureBeforeEveryTestSessionHit()
     {
-        await Assert.That(TestContext.Current?.ObjectBag["BeforeEveryTestSession"]).IsEquatableOrEqualTo(true);
+        await Assert.That(TestContext.Current?.StateBag.Items["BeforeEveryTestSession"]).IsEquatableOrEqualTo(true);
     }
 }

@@ -3,7 +3,9 @@ using TUnit.Core.Interfaces;
 
 namespace TUnit.Core.Hooks;
 
-[UnconditionalSuppressMessage("Trimming", "IL2111:Method with parameters or return value with `DynamicallyAccessedMembersAttribute` is accessed via reflection. Trimmer can\'t guarantee availability of the requirements of the method.")]
+#if NET8_0_OR_GREATER
+[RequiresUnreferencedCode("Method with DynamicallyAccessedMembersAttribute accessed via reflection")]
+#endif
 public class LastTestInClassAdapter(ILastTestInClassEventReceiver lastTestInClassEventReceiver, TestContext testContext) : IExecutableHook<ClassHookContext>
 {
     public string Name => nameof(lastTestInClassEventReceiver.OnLastTestInClass);
@@ -12,27 +14,27 @@ public class LastTestInClassAdapter(ILastTestInClassEventReceiver lastTestInClas
     public MethodMetadata MethodInfo => field ??= new MethodMetadata
     {
         Type = typeof(ILastTestInClassEventReceiver),
-        TypeReference = TypeReference.CreateConcrete(typeof(ILastTestInClassEventReceiver).AssemblyQualifiedName!),
+        TypeInfo = new ConcreteType(typeof(ILastTestInClassEventReceiver)),
         Name = nameof(lastTestInClassEventReceiver.OnLastTestInClass),
         Parameters = [new ParameterMetadata<ClassHookContext>
         {
-            TypeReference = TypeReference.CreateConcrete(typeof(ClassHookContext).AssemblyQualifiedName!),
+            TypeInfo = new ConcreteType(typeof(ClassHookContext)),
             Name = "context",
             ReflectionInfo = typeof(ILastTestInClassEventReceiver).GetMethod(nameof(ILastTestInClassEventReceiver.OnLastTestInClass))!.GetParameters()[0],
         }, new ParameterMetadata<TestContext>
         {
-            TypeReference = TypeReference.CreateConcrete(typeof(TestContext).AssemblyQualifiedName!),
+            TypeInfo = new ConcreteType(typeof(TestContext)),
             Name = "testContext",
             ReflectionInfo = typeof(ILastTestInClassEventReceiver).GetMethod(nameof(ILastTestInClassEventReceiver.OnLastTestInClass))!.GetParameters()[0],
         }],
         GenericTypeCount = 0,
         ReturnType = typeof(ValueTask),
-        ReturnTypeReference = TypeReference.CreateConcrete(typeof(ValueTask).AssemblyQualifiedName!),
+        ReturnTypeInfo = new ConcreteType(typeof(ValueTask)),
         Class = new ClassMetadata
         {
             Parent = null,
             Type = typeof(ILastTestInClassEventReceiver),
-            TypeReference = TypeReference.CreateConcrete(typeof(ILastTestInClassEventReceiver).AssemblyQualifiedName!),
+            TypeInfo = new ConcreteType(typeof(ILastTestInClassEventReceiver)),
             Assembly = new AssemblyMetadata
             {
                 Name = "TUnit.Core",

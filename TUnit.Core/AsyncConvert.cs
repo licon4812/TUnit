@@ -55,31 +55,18 @@ public static class AsyncConvert
                 | MethodImplOptions.AggressiveOptimization
 #endif
     )]
+
     public static async ValueTask ConvertObject(object? invoke)
     {
+        if (invoke is Delegate @delegate)
+        {
+            invoke = @delegate.DynamicInvoke();
+        }
+
         if (invoke is null)
         {
             return;
         }
-
-        if (invoke is Func<object> syncFunc)
-        {
-            syncFunc();
-            return;
-        }
-
-        if (invoke is Func<Task> asyncFunc)
-        {
-            await Convert(asyncFunc);
-            return;
-        }
-
-        if (invoke is Func<ValueTask> asyncValueFunc)
-        {
-            await Convert(asyncValueFunc);
-            return;
-        }
-
 
         if (invoke is Task task)
         {
@@ -126,25 +113,23 @@ public static class AsyncConvert
         }
     }
 
-    [System.Diagnostics.CodeAnalysis.DynamicDependency(System.Diagnostics.CodeAnalysis.DynamicallyAccessedMemberTypes.PublicMethods, "Microsoft.FSharp.Control.FSharpAsync", "FSharp.Core")]
-    [System.Diagnostics.CodeAnalysis.DynamicDependency("StartAsTask", "Microsoft.FSharp.Control.FSharpAsync", "FSharp.Core")]
-    [UnconditionalSuppressMessage("Trimming", "IL2077:Target parameter argument does not satisfy \'DynamicallyAccessedMembersAttribute\' in call to target method. The source field does not have matching annotations.",
-        Justification = "F# async support requires FSharp.Core types. The DynamicDependency attributes preserve required members.")]
-    [UnconditionalSuppressMessage("Trimming", "IL2072:Target parameter argument does not satisfy \'DynamicallyAccessedMembersAttribute\' in call to target method. The return value of the source method does not have matching annotations.",
-        Justification = "F# async type resolution is preserved through DynamicDependency. For AOT, ensure FSharp.Core is properly referenced.")]
-    [UnconditionalSuppressMessage("AOT", "IL3050:Calling members annotated with \'RequiresDynamicCodeAttribute\' may break functionality when AOT compiling.",
-        Justification = "F# async interop requires MakeGenericMethod. F# tests in AOT scenarios should use Task-based APIs.")]
-    [UnconditionalSuppressMessage("Trimming", "IL2060:Call to \'System.Reflection.MethodInfo.MakeGenericMethod\' can not be statically analyzed. It\'s not possible to guarantee the availability of requirements of the generic method.",
-        Justification = "Generic method instantiation for F# async types. The type parameter comes from the F# async type itself.")]
-    [UnconditionalSuppressMessage("Trimming", "IL2026:Members annotated with 'RequiresUnreferencedCodeAttribute' require dynamic access otherwise can break functionality when trimming application code", 
-        Justification = "F# async support is optional. Tests using F# async should ensure FSharp.Core is preserved in AOT scenarios.")]
-    [RequiresUnreferencedCode("F# async support requires dynamic access to FSharp.Core types.")]
-    [RequiresDynamicCode("F# async support requires runtime code generation for generic method instantiation.")]
+    [DynamicDependency(DynamicallyAccessedMemberTypes.PublicMethods, "Microsoft.FSharp.Control.FSharpAsync", "FSharp.Core")]
+    [DynamicDependency("StartAsTask", "Microsoft.FSharp.Control.FSharpAsync", "FSharp.Core")]
+    [UnconditionalSuppressMessage("Trimming", "IL2026:Members annotated with \'RequiresUnreferencedCodeAttribute\' require dynamic access otherwise can break functionality when trimming application code")]
+    [UnconditionalSuppressMessage("Trimming", "IL2060:Call to \'System.Reflection.MethodInfo.MakeGenericMethod\' can not be statically analyzed. It\'s not possible to guarantee the availability of requirements of the generic method.")]
+    [UnconditionalSuppressMessage("Trimming", "IL2072:Target parameter argument does not satisfy \'DynamicallyAccessedMembersAttribute\' in call to target method. The return value of the source method does not have matching annotations.")]
+    [UnconditionalSuppressMessage("Trimming", "IL2077:Target parameter argument does not satisfy \'DynamicallyAccessedMembersAttribute\' in call to target method. The source field does not have matching annotations.")]
+    [UnconditionalSuppressMessage("AOT", "IL3050:Calling members annotated with \'RequiresDynamicCodeAttribute\' may break functionality when AOT compiling.")]
     private static ValueTask StartAsFSharpTask(object invoke, Type type)
     {
         var startAsTaskOpenGenericMethod = (_fSharpAsyncType ??= type.Assembly.GetType("Microsoft.FSharp.Control.FSharpAsync"))!
             .GetRuntimeMethods()
-            .First(m => m.Name == "StartAsTask");
+            .FirstOrDefault(static m => m.Name == "StartAsTask");
+
+        if (startAsTaskOpenGenericMethod is null)
+        {
+            return default;
+        }
 
         var fSharpTask = (Task) startAsTaskOpenGenericMethod.MakeGenericMethod(type.GetGenericArguments()[0])
             .Invoke(null, [invoke, null, null])!;
@@ -157,23 +142,18 @@ public static class AsyncConvert
 
         return new ValueTask(fSharpTask);
     }
-    
+
     /// <summary>
     /// Safely invokes F# async conversion with proper suppression for the call site.
     /// </summary>
-    [UnconditionalSuppressMessage("Trimming", "IL2026:Using member with RequiresUnreferencedCodeAttribute",
-        Justification = "F# async is an optional feature. AOT applications should use Task-based APIs.")]
-    [UnconditionalSuppressMessage("AOT", "IL3050:Using member with RequiresDynamicCodeAttribute", 
-        Justification = "F# async requires runtime code generation. This is documented as not AOT-compatible.")]
     private static async ValueTask StartAsFSharpTaskSafely(object invoke, Type type)
     {
         if (IsFSharpAsyncSupported())
         {
             await StartAsFSharpTask(invoke, type);
-            return;
         }
     }
-    
+
     /// <summary>
     /// Checks if F# async support is available (not in AOT mode).
     /// </summary>
@@ -183,7 +163,7 @@ public static class AsyncConvert
         {
             return _isFSharpSupported.Value;
         }
-        
+
         // In AOT mode, we can't use reflection to invoke F# async methods
         // This is a runtime check that will return false in AOT scenarios
         try
@@ -199,8 +179,7 @@ public static class AsyncConvert
         }
     }
 
-    [UnconditionalSuppressMessage("Trimming", "IL2075:\'this\' argument does not satisfy \'DynamicallyAccessedMembersAttribute\' in call to target method. The return value of the source method does not have matching annotations.",
-        Justification = "GetAwaiter pattern detection for custom awaitables. For AOT, use standard Task/ValueTask types or implement IAsyncEnumerable.")]
+    [UnconditionalSuppressMessage("Trimming", "IL2075:\'this\' argument does not satisfy \'DynamicallyAccessedMembersAttribute\' in call to target method. The return value of the source method does not have matching annotations.")]
     public static bool TryGetAwaitableTask(object awaitable, [NotNullWhen(true)] out Task? task)
     {
         var getAwaiter = awaitable.GetType().GetMethod("GetAwaiter", Type.EmptyTypes);

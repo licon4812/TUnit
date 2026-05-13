@@ -1,7 +1,6 @@
 ﻿using System.Collections.Immutable;
 using Microsoft.CodeAnalysis;
 using TUnit.Core.SourceGenerator.Enums;
-using TUnit.Core.SourceGenerator.Extensions;
 using TUnit.Core.SourceGenerator.Utilities;
 
 namespace TUnit.Core.SourceGenerator.CodeGenerators.Writers;
@@ -10,17 +9,43 @@ public static class SourceInformationWriter
 {
     public static void GenerateClassInformation(ICodeWriter sourceCodeWriter, Compilation compilation, INamedTypeSymbol namedTypeSymbol)
     {
-        var parent = namedTypeSymbol.ContainingType;
-        var parentExpression = parent != null ? MetadataGenerationHelper.GenerateClassMetadataGetOrAdd(parent) : null;
-        var classMetadata = MetadataGenerationHelper.GenerateClassMetadataGetOrAdd(namedTypeSymbol, parentExpression);
-        sourceCodeWriter.Append(classMetadata);
-        sourceCodeWriter.Append(",");
-    }
+        var parentExpression = GenerateParentClassMetadataExpression(namedTypeSymbol, sourceCodeWriter.IndentLevel);
+        var classMetadata = MetadataGenerationHelper.GenerateClassMetadataGetOrAdd(namedTypeSymbol, parentExpression, sourceCodeWriter.IndentLevel);
 
-    private static void GenerateAssemblyInformation(ICodeWriter sourceCodeWriter, Compilation compilation, IAssemblySymbol assembly)
-    {
-        var assemblyMetadata = MetadataGenerationHelper.GenerateAssemblyMetadataGetOrAdd(assembly);
-        sourceCodeWriter.Append(assemblyMetadata);
+        // Handle multi-line class metadata similar to method metadata
+        var lines = classMetadata.Split(new[] { "\r\n", "\r", "\n" }, StringSplitOptions.None);
+
+        if (lines.Length > 0)
+        {
+            sourceCodeWriter.Append(lines[0].TrimStart());
+
+            if (lines.Length > 1)
+            {
+                var secondLine = lines[1];
+                var baseIndentSpaces = secondLine.Length - secondLine.TrimStart().Length;
+
+                for (var i = 1; i < lines.Length; i++)
+                {
+                    if (!string.IsNullOrWhiteSpace(lines[i]) || i < lines.Length - 1)
+                    {
+                        sourceCodeWriter.AppendLine();
+
+                        var line = lines[i];
+                        var lineIndentSpaces = line.Length - line.TrimStart().Length;
+                        var relativeIndent = Math.Max(0, lineIndentSpaces - baseIndentSpaces);
+                        var extraIndentLevels = relativeIndent / 4;
+
+                        var trimmedLine = line.TrimStart();
+                        for (var j = 0; j < extraIndentLevels; j++)
+                        {
+                            sourceCodeWriter.Append("    ");
+                        }
+                        sourceCodeWriter.Append(trimmedLine);
+                    }
+                }
+            }
+        }
+
         sourceCodeWriter.Append(",");
     }
 
@@ -28,9 +53,7 @@ public static class SourceInformationWriter
         Compilation compilation, INamedTypeSymbol namedTypeSymbol, IMethodSymbol methodSymbol,
         IDictionary<string, string>? genericSubstitutions, char suffix)
     {
-        var classMetadataExpression = MetadataGenerationHelper.GenerateClassMetadataGetOrAdd(namedTypeSymbol);
-        var methodMetadata = MetadataGenerationHelper.GenerateMethodMetadata(methodSymbol, classMetadataExpression);
-        sourceCodeWriter.Append(methodMetadata);
+        MetadataGenerationHelper.WriteMethodMetadata(sourceCodeWriter, methodSymbol, namedTypeSymbol);
         sourceCodeWriter.Append($"{suffix}");
         sourceCodeWriter.AppendLine();
     }
@@ -61,8 +84,7 @@ public static class SourceInformationWriter
     public static void GeneratePropertyInformation(ICodeWriter sourceCodeWriter,
         Compilation compilation, IPropertySymbol property, INamedTypeSymbol namedTypeSymbol)
     {
-        var propertyMetadata = MetadataGenerationHelper.GeneratePropertyMetadata(property, namedTypeSymbol);
-        sourceCodeWriter.Append(propertyMetadata);
+        MetadataGenerationHelper.WritePropertyMetadata(sourceCodeWriter, property, namedTypeSymbol);
         sourceCodeWriter.Append(",");
     }
 
@@ -72,8 +94,23 @@ public static class SourceInformationWriter
         IDictionary<string, string>? genericSubstitutions)
     {
         // For now, use the generic version since it's what the existing code was doing
-        var parameterMetadata = MetadataGenerationHelper.GenerateParameterMetadataGeneric(parameter);
-        sourceCodeWriter.Append(parameterMetadata);
+        MetadataGenerationHelper.WriteParameterMetadataGeneric(sourceCodeWriter, parameter);
         sourceCodeWriter.Append(",");
+    }
+
+    /// <summary>
+    /// Recursively generates parent ClassMetadata expression for nested types.
+    /// Returns null if the type has no containing type.
+    /// </summary>
+    private static string? GenerateParentClassMetadataExpression(INamedTypeSymbol typeSymbol, int indentLevel)
+    {
+        var parent = typeSymbol.ContainingType;
+        if (parent == null)
+        {
+            return null;
+        }
+
+        var grandparentExpression = GenerateParentClassMetadataExpression(parent, indentLevel);
+        return MetadataGenerationHelper.GenerateClassMetadataGetOrAdd(parent, grandparentExpression, indentLevel);
     }
 }

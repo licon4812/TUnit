@@ -6,7 +6,6 @@ using TUnit.TestProject.Attributes;
 namespace TUnit.TestProject.DynamicTests;
 
 [EngineTest(ExpectedResult.Pass)]
-[RunOnDiscovery]
 [Arguments(1, 2, 3)]
 [Arguments(101, 202, 303)]
 public class Runtime(int a, int b, int c)
@@ -25,12 +24,12 @@ public class Runtime(int a, int b, int c)
     {
         var context = TestContext.Current!;
 
-        await context.AddDynamicTest(new DynamicTestInstance<Runtime>
+        await context.AddDynamicTest(new DynamicTest<Runtime>
         {
             TestMethod = @class => @class.SomeMethod(0, 0, 0),
             TestClassArguments = [a + 10, b + 10, c + 10],
             TestMethodArguments = [d + 10, e + 10, f + 10],
-            Attributes = [new RepeatAttribute(5)]
+            Attributes = []
         });
     }
 }

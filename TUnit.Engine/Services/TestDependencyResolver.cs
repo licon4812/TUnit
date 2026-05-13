@@ -1,376 +1,348 @@
-using System.Collections.Concurrent;
 using TUnit.Core;
-using TUnit.Core.Enums;
-using TUnit.Core.Exceptions;
+using TUnit.Core.Helpers;
+using TUnit.Engine.Constants;
 
 namespace TUnit.Engine.Services;
 
-/// <summary>
-/// Resolves test dependencies on-demand during streaming
-/// </summary>
 internal sealed class TestDependencyResolver
 {
-    private readonly ConcurrentDictionary<string, AbstractExecutableTest> _testsByName = new();
-    private readonly ConcurrentDictionary<string, List<string>> _pendingDependents = new();
-    private readonly List<AbstractExecutableTest> _allTests = new();
-    private readonly ConcurrentDictionary<string, List<TestDetails>> _cachedTransitiveDependencies = new();
-    
-    // Index for efficient dependency matching
-    private readonly ConcurrentDictionary<string, List<AbstractExecutableTest>> _testsByClassName = new();
-    
-    // Track tests currently being resolved to prevent infinite loops
-    private readonly ConcurrentDictionary<string, bool> _testsBeingResolved = new();
+    private readonly List<AbstractExecutableTest> _allTests =
+    [
+    ];
+    private readonly Dictionary<Type, List<AbstractExecutableTest>> _testsByType = new();
+    private readonly Dictionary<string, List<AbstractExecutableTest>> _testsByMethodName = new();
+    private readonly Dictionary<(Type ClassType, string MethodName), AbstractExecutableTest> _testLookupCache = new();
+    private readonly HashSet<AbstractExecutableTest> _testsWithPendingDependencies =
+    [
+    ];
+    private readonly HashSet<AbstractExecutableTest> _testsBeingResolved =
+    [
+    ];
+    private readonly Lock _resolutionLock = new();
 
     public void RegisterTest(AbstractExecutableTest test)
     {
-        _testsByName[test.TestId] = test;
-        _allTests.Add(test);
-        
-        // Add to class name index for efficient matching
-        var className = test.Metadata.TestClassType.FullName ?? test.Metadata.TestClassType.Name;
-        _testsByClassName.AddOrUpdate(className,
-            _ => [test],
-            (_, list) => { list.Add(test); return list; });
+        lock (_resolutionLock)
+        {
+            _allTests.Add(test);
 
-        // Check if any tests are waiting for this specific test
-        if (_pendingDependents.TryRemove(test.TestId, out var dependents))
-        {
-            foreach (var dependentId in dependents)
+            var testType = test.Metadata.TestClassType;
+            if (!_testsByType.TryGetValue(testType, out var testsForType))
             {
-                if (_testsByName.TryGetValue(dependentId, out var dependent))
-                {
-                    ResolveDependenciesForTest(dependent);
-                }
+                testsForType =
+                [
+                ];
+                _testsByType[testType] = testsForType;
             }
-        }
-        
-        // Also check if any tests are waiting for this test's class
-        // This handles class-level dependencies
-        var testClassName = test.Metadata.TestClassType.FullName ?? test.Metadata.TestClassType.Name;
-        foreach (var kvp in _pendingDependents.ToList())
-        {
-            var depKey = kvp.Key;
-            
-            // Simple check if this is a class-level dependency for this test's class
-            if (depKey.Contains($"Class={test.Metadata.TestClassType.Name}") && 
-                depKey.Contains("Method=") == false)
+            testsForType.Add(test);
+
+            var methodName = test.Metadata.TestMethodName;
+            if (!_testsByMethodName.TryGetValue(methodName, out var testsForMethod))
             {
-                if (_pendingDependents.TryRemove(depKey, out var waitingTests))
-                {
-                    foreach (var dependentId in waitingTests)
-                    {
-                        if (_testsByName.TryGetValue(dependentId, out var dependent))
-                        {
-                            ResolveDependenciesForTest(dependent);
-                        }
-                    }
-                }
+                testsForMethod =
+                [
+                ];
+                _testsByMethodName[methodName] = testsForMethod;
             }
+            testsForMethod.Add(test);
+
+            // Cache test by composite key for fast lookups in GetTransitiveDependencies
+            _testLookupCache[(testType, methodName)] = test;
+
+            ResolvePendingDependencies();
         }
     }
 
     public bool TryResolveDependencies(AbstractExecutableTest test)
     {
-        if (test.Dependencies.Length > 0)
+        lock (_resolutionLock)
         {
-            return true; // Already resolved
-        }
+            if (test.Dependencies.Length > 0)
+            {
+                return true;
+            }
 
-        return ResolveDependenciesForTest(test);
+            return ResolveDependenciesForTest(test);
+        }
     }
 
     private bool ResolveDependenciesForTest(AbstractExecutableTest test)
     {
-        // Prevent recursive resolution
-        if (!_testsBeingResolved.TryAdd(test.TestId, true))
+        if (!_testsBeingResolved.Add(test))
         {
-            return false; // Already being resolved
+            return false;
         }
-        
+
         try
         {
-            
-            var dependencies = new List<AbstractExecutableTest>();
+            var resolvedDependencies = new List<ResolvedDependency>();
             var allResolved = true;
 
-            foreach (var dependency in test.Metadata.Dependencies)
+            foreach (var dependencyMetadata in test.Metadata.Dependencies)
             {
-                List<AbstractExecutableTest> matchingTests;
-                
-                // Optimize class-level dependency matching
-                if (dependency.ClassType != null && string.IsNullOrEmpty(dependency.MethodName))
-                {
-                    // For class-level dependencies, use the class name index
-                    var className = dependency.ClassType.FullName ?? dependency.ClassType.Name;
-                    if (_testsByClassName.TryGetValue(className, out var testsInClass))
-                    {
-                        matchingTests = testsInClass
-                            .Where(t => dependency.Matches(t.Metadata, test.Metadata))
-                            .ToList();
-                    }
-                    else
-                    {
-                        matchingTests = new List<AbstractExecutableTest>();
-                    }
-                }
-                else
-                {
-                    // For other dependencies, fall back to full search
-                    // but limit the search space if possible
-                    matchingTests = _testsByName.Values
-                        .Where(t => dependency.Matches(t.Metadata, test.Metadata))
-                        .ToList();
-                }
+                var matchingTests = FindMatchingTests(dependencyMetadata, test);
 
                 if (matchingTests.Count == 0)
                 {
-                    // Dependency not yet discovered, register for notification
-                    var depKey = dependency.ToString();
-                    _pendingDependents.AddOrUpdate(depKey,
-                        _ =>
-                        [
-                            test.TestId
-                        ],
-                        (_, list) => { list.Add(test.TestId); return list; });
+                    _testsWithPendingDependencies.Add(test);
                     allResolved = false;
                 }
                 else
                 {
-                    dependencies.AddRange(matchingTests);
+                    foreach (var matchingTest in matchingTests)
+                    {
+                        resolvedDependencies.Add(new ResolvedDependency
+                        {
+                            Test = matchingTest,
+                            Metadata = dependencyMetadata
+                        });
+                    }
                 }
             }
 
             if (allResolved)
             {
-                var distinctDeps = dependencies
-                    .Distinct()
-                    .Where(d => d.TestId != test.TestId)
-                    .ToList();
-                
-                // Safeguard: Limit the number of direct dependencies to prevent memory issues
-                const int MaxDirectDependencies = 1000;
-                if (distinctDeps.Count > MaxDirectDependencies)
+                var uniqueDependencies = new Dictionary<AbstractExecutableTest, ResolvedDependency>(capacity: 8);
+                foreach (var dep in resolvedDependencies)
                 {
-                    distinctDeps = distinctDeps.Take(MaxDirectDependencies).ToList();
-                }
-                
-                test.Dependencies = distinctDeps.ToArray();
+                    if (dep.Test == test)
+                    {
+                        continue;
+                    }
 
-                // Skip updating TestContext.Dependencies for now - will be done after circular dependency check
-                // to avoid infinite loops
+                    if (!uniqueDependencies.ContainsKey(dep.Test))
+                    {
+                        uniqueDependencies[dep.Test] = dep;
+                    }
+                }
+
+                test.Dependencies = uniqueDependencies.Values.ToArray();
+
+                _testsWithPendingDependencies.Remove(test);
+
+                return true;
             }
 
-            return allResolved;
+            return false;
         }
         finally
         {
-            _testsBeingResolved.TryRemove(test.TestId, out _);
+            _testsBeingResolved.Remove(test);
         }
     }
 
-
-    public void CheckForCircularDependencies()
+    private List<AbstractExecutableTest> FindMatchingTests(TestDependency dependency, AbstractExecutableTest dependentTest)
     {
-        
-        // Use a more efficient algorithm for large graphs
-        // Instead of checking every test, we'll use a topological sort approach
-        var inDegree = new Dictionary<string, int>();
-        var adjacencyList = new Dictionary<string, List<string>>();
-        
-        // Build the graph
-        foreach (var test in _allTests)
+        var matches = new List<AbstractExecutableTest>();
+
+        IEnumerable<AbstractExecutableTest> searchScope;
+
+        if (dependency.ClassType != null && string.IsNullOrEmpty(dependency.MethodName))
         {
-            inDegree[test.TestId] = 0;
-            adjacencyList[test.TestId] = new List<string>();
-        }
-        
-        foreach (var test in _allTests)
-        {
-            foreach (var dep in test.Dependencies)
+            if (_testsByType.TryGetValue(dependency.ClassType, out var testsInType))
             {
-                adjacencyList[dep.TestId].Add(test.TestId);
-                inDegree[test.TestId]++;
+                searchScope = testsInType;
+            }
+            else
+            {
+                return matches;
             }
         }
-        
-        // Perform topological sort using Kahn's algorithm
-        var queue = new Queue<string>();
-        var sortedCount = 0;
-        
-        // Find all nodes with no incoming edges
-        foreach (var kvp in inDegree)
+        else if (!string.IsNullOrEmpty(dependency.MethodName))
         {
-            if (kvp.Value == 0)
+            if (dependency.MethodName != null && _testsByMethodName.TryGetValue(dependency.MethodName, out var testsWithMethod))
             {
-                queue.Enqueue(kvp.Key);
+                searchScope = testsWithMethod;
+            }
+            else
+            {
+                return matches;
             }
         }
-        
-        while (queue.Count > 0)
+        else
         {
-            var currentId = queue.Dequeue();
-            sortedCount++;
-            
-            // Process all neighbors
-            if (adjacencyList.TryGetValue(currentId, out var neighbors))
+            searchScope = _allTests;
+        }
+
+        foreach (var test in searchScope)
+        {
+            if (dependency.Matches(test.Metadata, dependentTest.Metadata))
             {
-                foreach (var neighbor in neighbors)
+                matches.Add(test);
+            }
+        }
+
+        return matches;
+    }
+
+    private void ResolvePendingDependencies()
+    {
+        _testsWithPendingDependencies.RemoveWhere(static test => test.Dependencies.Length > 0);
+        foreach (var test in _testsWithPendingDependencies)
+        {
+            ResolveDependenciesForTest(test);
+        }
+    }
+
+    /// <summary>
+    /// Resolves dependencies for a batch of tests in parallel.
+    /// This must only be called after all tests have been registered via <see cref="RegisterTest"/>,
+    /// since registration is complete the internal dictionaries are effectively read-only,
+    /// and each test's Dependencies are written independently, making this safe to parallelize.
+    /// </summary>
+    public void BatchResolveDependencies(List<AbstractExecutableTest> tests)
+    {
+        var testsWithDependencies = new List<AbstractExecutableTest>();
+        foreach (var test in tests)
+        {
+            if (test.Metadata.Dependencies.Length > 0)
+            {
+                testsWithDependencies.Add(test);
+            }
+        }
+
+        if (testsWithDependencies.Count == 0)
+        {
+            return;
+        }
+
+        Parallel.ForEach(testsWithDependencies, test =>
+        {
+            ResolveDependenciesForTestLockFree(test);
+        });
+    }
+
+    /// <summary>
+    /// Lock-free resolution for the batch path. Safe to call concurrently because:
+    /// - The lookup dictionaries (_testsByType, _testsByMethodName, _allTests) are read-only after registration.
+    /// - Each test's Dependencies field is only written by its own resolution (no cross-test writes).
+    /// </summary>
+    private void ResolveDependenciesForTestLockFree(AbstractExecutableTest test)
+    {
+        if (test.Dependencies.Length > 0)
+        {
+            return;
+        }
+
+        var resolvedDependencies = new List<ResolvedDependency>();
+        var allResolved = true;
+
+        foreach (var dependencyMetadata in test.Metadata.Dependencies)
+        {
+            var matchingTests = FindMatchingTests(dependencyMetadata, test);
+
+            if (matchingTests.Count == 0)
+            {
+                allResolved = false;
+            }
+            else
+            {
+                foreach (var matchingTest in matchingTests)
                 {
-                    inDegree[neighbor]--;
-                    if (inDegree[neighbor] == 0)
+                    resolvedDependencies.Add(new ResolvedDependency
                     {
-                        queue.Enqueue(neighbor);
-                    }
-                }
-            }
-        }
-        
-        // If we couldn't sort all tests, there's a cycle
-        if (sortedCount < _allTests.Count)
-        {
-            // Find tests that are part of cycles (those with non-zero in-degree)
-            var testsInCycles = _allTests.Where(t => inDegree[t.TestId] > 0).ToList();
-            
-            // Only check these specific tests for circular dependencies
-            foreach (var test in testsInCycles)
-            {
-                try
-                {
-                    CheckForCircularDependency(test, new HashSet<string>(), new Stack<AbstractExecutableTest>());
-                }
-                catch (DependencyConflictException ex)
-                {
-                    // Mark this test as failed due to circular dependency
-                    test.Result = new TestResult
-                    {
-                        State = TestState.Failed,
-                        Start = DateTimeOffset.UtcNow,
-                        End = DateTimeOffset.UtcNow,
-                        Duration = TimeSpan.Zero,
-                        Exception = ex,
-                        ComputerName = Environment.MachineName,
-                        TestContext = test.Context
-                    };
-                    test.State = TestState.Failed;
+                        Test = matchingTest,
+                        Metadata = dependencyMetadata
+                    });
                 }
             }
         }
 
-        // Second pass: Build transitive dependencies for non-failed tests
-        // We need to populate TestContext.Dependencies with all transitive dependencies
-        // for backward compatibility. Use an efficient approach with memoization.
-        
-        foreach (var test in _allTests.Where(t => t.State != TestState.Failed))
+        if (allResolved)
         {
-            test.Context.Dependencies.Clear();
-            
-            // Check if we already have cached dependencies
-            if (_cachedTransitiveDependencies.TryGetValue(test.TestId, out var cachedDeps))
+            var uniqueDependencies = new Dictionary<AbstractExecutableTest, ResolvedDependency>(capacity: 8);
+            foreach (var dep in resolvedDependencies)
             {
-                foreach (var dep in cachedDeps)
-                {
-                    test.Context.Dependencies.Add(dep);
-                }
-                continue;
-            }
-            
-            // Build transitive dependencies using BFS to avoid stack overflow
-            var allDeps = new HashSet<TestDetails>();
-            var depQueue = new Queue<AbstractExecutableTest>();
-            var visited = new HashSet<string>();
-            
-            // Add direct dependencies to queue
-            foreach (var dep in test.Dependencies)
-            {
-                depQueue.Enqueue(dep);
-            }
-            
-            // Process queue to get all transitive dependencies
-            // Limit iterations to prevent infinite loops
-            const int maxIterations = 10000;
-            var iterations = 0;
-            
-            while (depQueue.Count > 0 && iterations < maxIterations)
-            {
-                iterations++;
-                var dep = depQueue.Dequeue();
-                
-                // Skip if we've already processed this test
-                if (!visited.Add(dep.TestId))
+                if (dep.Test == test)
                 {
                     continue;
                 }
-                
-                allDeps.Add(dep.Context.TestDetails);
-                
-                // Add this test's dependencies to the queue
-                foreach (var subDep in dep.Dependencies)
+
+                if (!uniqueDependencies.ContainsKey(dep.Test))
                 {
-                    depQueue.Enqueue(subDep);
+                    uniqueDependencies[dep.Test] = dep;
                 }
             }
-            
-            // Cache the result
-            var depsList = allDeps.ToList();
-            _cachedTransitiveDependencies[test.TestId] = depsList;
-            
-            // Add to context
-            foreach (var dep in depsList)
+
+            test.Dependencies = uniqueDependencies.Values.ToArray();
+        }
+    }
+
+    public void ResolveAllDependencies()
+    {
+        lock (_resolutionLock)
+        {
+            foreach (var test in _allTests)
             {
-                test.Context.Dependencies.Add(dep);
+                if (test.Dependencies.Length == 0 && test.Metadata.Dependencies.Length > 0)
+                {
+                    ResolveDependenciesForTest(test);
+                }
+            }
+
+            var maxRetries = EngineDefaults.DependencyResolutionMaxRetries;
+            for (var retry = 0; retry < maxRetries && _testsWithPendingDependencies.Count > 0; retry++)
+            {
+                ResolvePendingDependencies();
+            }
+
+            if (_testsWithPendingDependencies.Count > 0)
+            {
+                foreach (var test in _testsWithPendingDependencies)
+                {
+                    CreateDependencyResolutionFailedResult(test);
+                }
             }
         }
     }
 
-    private void CheckForCircularDependency(
-        AbstractExecutableTest test,
-        HashSet<string> visited,
-        Stack<AbstractExecutableTest> path)
+
+    public IReadOnlyList<TestDetails> GetTransitiveDependencies(TestDetails testDetails)
     {
-        // Add current test to the path
-        path.Push(test);
+        var visited = new HashSet<TestDetails>();
+        var result = new List<TestDetails>();
 
-        // Add the current test to the visited set to detect cycles
-        if (!visited.Add(test.TestId))
+        void CollectDependencies(TestDetails current)
         {
-            // We've encountered this test before in our current path - circular dependency
-            // Build the dependency chain for the error message
-            var pathList = path.Reverse().ToList();
-            var cycleStartIndex = pathList.FindIndex(t => t.TestId == test.TestId);
-            var cycleTests = pathList.Skip(cycleStartIndex).ToList();
-
-            // Convert to TestDetails for the exception
-            var testDetailsChain = cycleTests.Select(t => t.Context.TestDetails).ToList();
-            throw new DependencyConflictException(testDetailsChain);
-        }
-
-        try
-        {
-            // Check each dependency
-            foreach (var dep in test.Dependencies)
+            if (!visited.Add(current))
             {
-                CheckForCircularDependency(dep, visited, path);
+                return;
+            }
+
+            // Use cached lookup instead of linear search through all tests
+            if (!_testLookupCache.TryGetValue((current.ClassType, current.TestName), out var test))
+            {
+                return;
+            }
+
+            if (test.Dependencies != null)
+            {
+                foreach (var dep in test.Dependencies)
+                {
+                    var depDetails = dep.Test.Context.Metadata.TestDetails;
+                    result.Add(depDetails);
+                    CollectDependencies(depDetails);
+                }
             }
         }
-        finally
-        {
-            // Remove from visited set and path when we're done with this test
-            visited.Remove(test.TestId);
-            path.Pop();
-        }
+
+        CollectDependencies(testDetails);
+        return result;
     }
 
-
-    private List<TestDetails> BuildTestChain(List<string> cycle)
+    private static void CreateDependencyResolutionFailedResult(AbstractExecutableTest test)
     {
-        var testChain = new List<TestDetails>();
-        foreach (var testId in cycle)
+        test.State = TestState.Failed;
+        var now = DateTimeOffset.UtcNow;
+        test.Result = new TestResult
         {
-            if (_testsByName.TryGetValue(testId, out var test))
-            {
-                testChain.Add(test.Context.TestDetails);
-            }
-        }
-        return testChain;
+            State = TestState.Failed,
+            Start = now,
+            End = now,
+            Duration = TimeSpan.Zero,
+            Exception = new InvalidOperationException(
+                $"Could not resolve all dependencies for test {test.Metadata.TestClassType.Name}.{test.Metadata.TestMethodName}"),
+            ComputerName = EnvironmentHelper.MachineName
+        };
     }
 }

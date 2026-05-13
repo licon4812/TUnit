@@ -7,10 +7,10 @@ using LogLevel = TUnit.Core.Logging.LogLevel;
 
 namespace TUnit.Engine.Logging;
 
-public class TUnitFrameworkLogger(IExtension extension, IOutputDevice outputDevice, ILogger logger, VerbosityService verbosityService)
+public class TUnitFrameworkLogger(IExtension extension, IOutputDevice outputDevice, ILogger logger, LogLevelProvider logLevelProvider)
     : IOutputDeviceDataProducer, Core.Logging.ILogger
 {
-    private readonly bool _hideTestOutput = verbosityService.HideTestOutput;
+    private readonly LogLevel _minimumLogLevel = logLevelProvider.LogLevel;
 
     private readonly MTPLoggerAdapter _adapter = new(logger);
 
@@ -39,7 +39,7 @@ public class TUnitFrameworkLogger(IExtension extension, IOutputDevice outputDevi
             {
                 ConsoleColor = GetConsoleColor(logLevel)
             }
-        });
+        }, CancellationToken.None);
 
         await _adapter.LogAsync(logLevel, state, exception, formatter);
     }
@@ -59,7 +59,7 @@ public class TUnitFrameworkLogger(IExtension extension, IOutputDevice outputDevi
             {
                 ConsoleColor = GetConsoleColor(logLevel)
             }
-        });
+        }, CancellationToken.None);
 
         _adapter.Log(logLevel, state, exception, formatter);
     }
@@ -76,13 +76,26 @@ public class TUnitFrameworkLogger(IExtension extension, IOutputDevice outputDevi
             return ConsoleColor.DarkRed;
         }
 
+        // Console.ForegroundColor is not supported on browser platforms
+#if NET5_0_OR_GREATER
+        if (!OperatingSystem.IsBrowser())
+        {
+            return Console.ForegroundColor;
+        }
+        return ConsoleColor.Gray; // Default color for browser platforms
+#else
         return Console.ForegroundColor;
+#endif
     }
 
     public bool IsEnabled(LogLevel logLevel)
     {
-        return !_hideTestOutput && logger.IsEnabled(MTPLoggerAdapter.Map(logLevel));
+        return logLevel >= _minimumLogLevel;
     }
+
+    public bool IsDebugEnabled => _minimumLogLevel <= LogLevel.Debug;
+
+    public bool IsTraceEnabled => _minimumLogLevel <= LogLevel.Trace;
 
     public async Task LogErrorAsync(string message)
     {

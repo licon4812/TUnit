@@ -1,8 +1,11 @@
+using System.Collections.Immutable;
+using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CodeFixes;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Testing;
 using Microsoft.CodeAnalysis.Diagnostics;
 using Microsoft.CodeAnalysis.Testing;
+using Microsoft.CodeAnalysis.Text;
 
 namespace TUnit.Analyzers.Tests.Verifiers;
 
@@ -10,10 +13,16 @@ public static partial class CSharpCodeFixVerifier<TAnalyzer, TCodeFix>
     where TAnalyzer : DiagnosticAnalyzer, new()
     where TCodeFix : CodeFixProvider, new()
 {
-    public class Test : CSharpCodeFixTest<TAnalyzer, TCodeFix, DefaultVerifier>
+    public class Test : CSharpCodeFixTest<TAnalyzer, TCodeFix, LineEndingNormalizingVerifier>
     {
         public Test()
         {
+            // Add EditorConfig to force LF line endings for cross-platform consistency
+            TestState.AnalyzerConfigFiles.Add(("/.editorconfig", SourceText.From("""
+                is_global = true
+                end_of_line = lf
+                """)));
+
             SolutionTransforms.Add((solution, projectId) =>
             {
                 var project = solution.GetProject(projectId);
@@ -35,7 +44,12 @@ public static partial class CSharpCodeFixVerifier<TAnalyzer, TCodeFix>
                     return solution;
                 }
 
-                compilationOptions = compilationOptions.WithSpecificDiagnosticOptions(compilationOptions.SpecificDiagnosticOptions.SetItems(CSharpVerifierHelper.NullableWarnings));
+                compilationOptions = compilationOptions
+                    .WithSpecificDiagnosticOptions(compilationOptions.SpecificDiagnosticOptions
+                        .SetItems(CSharpVerifierHelper.NullableWarnings)
+                        // Suppress analyzer release tracking warnings - we're testing TUnit analyzers, not release tracking
+                        .SetItem("RS2007", ReportDiagnostic.Suppress)
+                        .SetItem("RS2008", ReportDiagnostic.Suppress));
 
                 solution = solution.WithProjectCompilationOptions(projectId, compilationOptions)
                     .WithProjectParseOptions(projectId, parseOptions.WithLanguageVersion(LanguageVersion.Preview));

@@ -1,5 +1,7 @@
+using System.Collections.Concurrent;
 using System.Diagnostics.CodeAnalysis;
 using System.Reflection;
+using System.Runtime.CompilerServices;
 using TUnit.Core;
 
 namespace TUnit.Engine.Discovery;
@@ -10,26 +12,93 @@ namespace TUnit.Engine.Discovery;
 internal static class ReflectionAttributeExtractor
 {
     /// <summary>
+    /// Cache for attribute lookups to avoid repeated reflection calls
+    /// </summary>
+    private static readonly ConcurrentDictionary<AttributeCacheKey, Attribute?> _attributeCache = new();
+
+    /// <summary>
+    /// Cache for multiple attributes lookups to avoid repeated reflection calls
+    /// </summary>
+    private static readonly ConcurrentDictionary<AttributeCacheKey, Attribute[]> _attributesCache = new();
+
+    /// <summary>
+    /// Cache for all attributes lookups (method + class + assembly combined)
+    /// </summary>
+    private static readonly ConcurrentDictionary<(Type, MethodInfo), Attribute[]> _allAttributesCache = new();
+
+    /// <summary>
+    /// Composite cache key combining type, method, and attribute type information
+    /// </summary>
+    private readonly struct AttributeCacheKey : IEquatable<AttributeCacheKey>
+    {
+        public readonly Type TestClass;
+        public readonly MethodInfo? TestMethod;
+        public readonly Type AttributeType;
+
+        public AttributeCacheKey(Type testClass, MethodInfo? testMethod, Type attributeType)
+        {
+            TestClass = testClass;
+            TestMethod = testMethod;
+            AttributeType = attributeType;
+        }
+
+        public bool Equals(AttributeCacheKey other)
+        {
+            return TestClass == other.TestClass &&
+                   TestMethod == other.TestMethod &&
+                   AttributeType == other.AttributeType;
+        }
+
+        public override bool Equals(object? obj)
+        {
+            return obj is AttributeCacheKey other && Equals(other);
+        }
+
+        public override int GetHashCode()
+        {
+            unchecked
+            {
+                var hash = TestClass.GetHashCode();
+                hash = (hash * 397) ^ (TestMethod?.GetHashCode() ?? 0);
+                hash = (hash * 397) ^ AttributeType.GetHashCode();
+                return hash;
+            }
+        }
+    }
+    /// <summary>
     /// Extracts attributes from method, class, and assembly levels with proper precedence
     /// </summary>
     public static T? GetAttribute<T>(Type testClass, MethodInfo? testMethod = null) where T : Attribute
     {
-        if (testMethod != null)
+#if NET
+        if (!RuntimeFeature.IsDynamicCodeSupported)
         {
-            var methodAttr = testMethod.GetCustomAttribute<T>();
-            if (methodAttr != null)
+            throw new Exception("Using TUnit Reflection mechanisms isn't supported in AOT mode");
+        }
+#endif
+
+        var cacheKey = new AttributeCacheKey(testClass, testMethod, typeof(T));
+
+        return (T?)_attributeCache.GetOrAdd(cacheKey, key =>
+        {
+            // Original lookup logic preserved
+            if (key.TestMethod != null)
             {
-                return methodAttr;
+                var methodAttr = key.TestMethod.GetCustomAttribute<T>();
+                if (methodAttr != null)
+                {
+                    return methodAttr;
+                }
             }
-        }
 
-        var classAttr = testClass.GetCustomAttribute<T>();
-        if (classAttr != null)
-        {
-            return classAttr;
-        }
+            var classAttr = key.TestClass.GetCustomAttribute<T>();
+            if (classAttr != null)
+            {
+                return classAttr;
+            }
 
-        return testClass.Assembly.GetCustomAttribute<T>();
+            return key.TestClass.Assembly.GetCustomAttribute<T>();
+        });
     }
 
     /// <summary>
@@ -37,23 +106,37 @@ internal static class ReflectionAttributeExtractor
     /// </summary>
     public static IEnumerable<T> GetAttributes<T>(Type testClass, MethodInfo? testMethod = null) where T : Attribute
     {
-        var attributes = new List<T>();
-
-        attributes.AddRange(testClass.Assembly.GetCustomAttributes<T>());
-        attributes.AddRange(testClass.GetCustomAttributes<T>());
-
-        if (testMethod != null)
+#if NET
+        if (!RuntimeFeature.IsDynamicCodeSupported)
         {
-            attributes.AddRange(testMethod.GetCustomAttributes<T>());
+            throw new Exception("Using TUnit Reflection mechanisms isn't supported in AOT mode");
         }
+#endif
 
-        return attributes;
+        var cacheKey = new AttributeCacheKey(testClass, testMethod, typeof(T));
+
+        var cachedAttributes = _attributesCache.GetOrAdd(cacheKey, key =>
+        {
+            var attributes = new List<Attribute>();
+
+            attributes.AddRange(key.TestClass.Assembly.GetCustomAttributes(key.AttributeType));
+            attributes.AddRange(key.TestClass.GetCustomAttributes(key.AttributeType));
+
+            if (key.TestMethod != null)
+            {
+                attributes.AddRange(key.TestMethod.GetCustomAttributes(key.AttributeType));
+            }
+
+            return attributes.ToArray();
+        });
+
+        return cachedAttributes.Cast<T>();
     }
 
     public static string[] ExtractCategories(Type testClass, MethodInfo testMethod)
     {
         var categories = new HashSet<string>();
-        
+
         foreach (var attr in GetAttributes<CategoryAttribute>(testClass, testMethod))
         {
             categories.Add(attr.Category);
@@ -69,24 +152,6 @@ internal static class ReflectionAttributeExtractor
         return skipAttr != null;
     }
 
-    public static int? ExtractTimeout(Type testClass, MethodInfo testMethod)
-    {
-        var timeoutAttr = GetAttribute<TimeoutAttribute>(testClass, testMethod);
-        return timeoutAttr != null ? (int)timeoutAttr.Timeout.TotalMilliseconds : null;
-    }
-
-    public static int ExtractRetryCount(Type testClass, MethodInfo testMethod)
-    {
-        var retryAttr = GetAttribute<RetryAttribute>(testClass, testMethod);
-        return retryAttr?.Times ?? 0;
-    }
-
-    public static int ExtractRepeatCount(Type testClass, MethodInfo testMethod)
-    {
-        var repeatAttr = GetAttribute<RepeatAttribute>(testClass, testMethod);
-        return repeatAttr?.Times ?? 0;
-    }
-
     public static bool CanRunInParallel(Type testClass, MethodInfo testMethod)
     {
         return GetAttribute<NotInParallelAttribute>(testClass, testMethod) == null;
@@ -95,7 +160,7 @@ internal static class ReflectionAttributeExtractor
     public static TestDependency[] ExtractDependencies(Type testClass, MethodInfo testMethod)
     {
         var dependencies = new List<TestDependency>();
-        
+
         foreach (var attr in GetAttributes<DependsOnAttribute>(testClass, testMethod))
         {
             dependencies.Add(attr.ToTestDependency());
@@ -121,15 +186,18 @@ internal static class ReflectionAttributeExtractor
 
     public static Attribute[] GetAllAttributes(Type testClass, MethodInfo testMethod)
     {
-        var attributes = new List<Attribute>();
-        
-        // Add in reverse order of precedence so method attributes come first
-        // This ensures ScopedAttributeFilter will keep method-level attributes over class/assembly
-        attributes.AddRange(testMethod.GetCustomAttributes());
-        attributes.AddRange(testClass.GetCustomAttributes());
-        attributes.AddRange(testClass.Assembly.GetCustomAttributes());
-        
-        return attributes.ToArray();
+        return _allAttributesCache.GetOrAdd((testClass, testMethod), key =>
+        {
+            var attributes = new List<Attribute>();
+
+            // Add in reverse order of precedence so method attributes come first
+            // This ensures ScopedAttributeFilter will keep method-level attributes over class/assembly
+            attributes.AddRange(key.Item2.GetCustomAttributes());
+            attributes.AddRange(key.Item1.GetCustomAttributes());
+            attributes.AddRange(key.Item1.Assembly.GetCustomAttributes());
+
+            return attributes.ToArray();
+        });
     }
 
     [UnconditionalSuppressMessage("Trimming",
@@ -139,7 +207,7 @@ internal static class ReflectionAttributeExtractor
     {
         var propertyDataSources = new List<PropertyDataSource>();
 
-        var properties = testClass.GetProperties(BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static)
+        var properties = testClass.GetProperties(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static)
             .Where(p => p.CanWrite);
 
         foreach (var property in properties)

@@ -1,4 +1,7 @@
-﻿namespace TUnit.Core;
+﻿using System.Collections.Concurrent;
+using TUnit.Core.Interfaces;
+
+namespace TUnit.Core;
 
 /// <summary>
 /// Represents the context for building tests.
@@ -6,6 +9,7 @@
 public record TestBuilderContext
 {
     private static readonly AsyncLocal<TestBuilderContext?> BuilderContexts = new();
+    private string? _definitionId;
 
     /// <summary>
     /// Gets the current test builder context.
@@ -16,9 +20,40 @@ public record TestBuilderContext
         internal set => BuilderContexts.Value = value;
     }
 
-    public Guid Id { get; } = Guid.NewGuid();
-    public Dictionary<string, object?> ObjectBag { get; set; } = [];
-    public TestContextEvents Events { get; set; } = new();
+    /// <summary>
+    /// Gets the unique definition ID for this context. Generated lazily on first access.
+    /// </summary>
+    public string DefinitionId => _definitionId ??= Guid.NewGuid().ToString();
+
+    private ConcurrentDictionary<string, object?>? _stateBag;
+    private TestContextEvents? _events;
+
+    /// <summary>
+    /// Gets the state bag for storing arbitrary data during test building.
+    /// </summary>
+    public ConcurrentDictionary<string, object?> StateBag
+    {
+        get => _stateBag ??= new ConcurrentDictionary<string, object?>();
+        set => _stateBag = value;
+    }
+
+    /// <inheritdoc cref="StateBag"/>
+    [Obsolete("Use StateBag property instead.")]
+    public ConcurrentDictionary<string, object?> ObjectBag => StateBag;
+
+    internal void CopyStateBagTo(TestBuilderContext target)
+    {
+        if (_stateBag is { IsEmpty: false } bag)
+        {
+            target.StateBag = new ConcurrentDictionary<string, object?>(bag);
+        }
+    }
+
+    public TestContextEvents Events
+    {
+        get => _events ??= new TestContextEvents();
+        set => _events = value;
+    }
 
     public IDataSourceAttribute? DataSourceAttribute { get; set; }
 
@@ -27,11 +62,19 @@ public record TestBuilderContext
     /// </summary>
     public required MethodMetadata TestMetadata { get; init; }
 
+    internal IClassConstructor? ClassConstructor { get; set; }
+
+    /// <summary>
+    /// Cached and initialized attributes for the test
+    /// </summary>
+    internal Attribute[]? InitializedAttributes { get; set; }
+
     public void RegisterForInitialization(object? obj)
     {
         Events.OnInitialize += async (sender, args) =>
         {
-            await ObjectInitializer.InitializeAsync(obj);
+            // Discovery: only IAsyncDiscoveryInitializer
+            await ObjectInitializer.InitializeForDiscoveryAsync(obj);
         };
     }
 
@@ -39,7 +82,11 @@ public record TestBuilderContext
     {
         return new TestBuilderContext
         {
-            Events = testContext.Events, TestMetadata = testContext.TestDetails.MethodMetadata, DataSourceAttribute = dataSourceAttribute, ObjectBag = testContext.ObjectBag,
+            Events = testContext.InternalEvents,
+            TestMetadata = testContext.Metadata.TestDetails.MethodMetadata,
+            DataSourceAttribute = dataSourceAttribute,
+            StateBag = testContext.StateBag.Items,
+            ClassConstructor = testContext.ClassConstructor,
         };
     }
 }
@@ -47,7 +94,23 @@ public record TestBuilderContext
 /// <summary>
 /// Provides access to the current <see cref="TestBuilderContext"/>.
 /// </summary>
-public class TestBuilderContextAccessor(TestBuilderContext context)
+public class TestBuilderContextAccessor
 {
-    public TestBuilderContext Current { get; set; } = context;
+    private TestBuilderContext _current;
+
+    public TestBuilderContextAccessor(TestBuilderContext context)
+    {
+        _current = context;
+        TestBuilderContext.Current = context;
+    }
+
+    public TestBuilderContext Current
+    {
+        get => _current;
+        set
+        {
+            _current = value;
+            TestBuilderContext.Current = value;
+        }
+    }
 }

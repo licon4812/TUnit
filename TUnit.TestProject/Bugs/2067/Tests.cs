@@ -22,22 +22,24 @@ public class Tests(DataClass dataClass)
             .FirstOrDefault(x => x.ClassType == typeof(Tests))
             ?.Tests;
 
-        if (tests is null || tests.Any(x => x.Result == null))
+        if (tests is null || tests.Any(x => x.Execution.Result == null))
         {
             return;
         }
 
         var dataClasses = tests
-            .SelectMany(x => x.TestDetails.TestClassArguments)
+            .SelectMany(x => x.Metadata.TestDetails.TestClassArguments)
             .OfType<DataClass>()
             .ToArray();
 
         using var _ = Assert.Multiple();
 
-        var dataClass = await Assert.That(dataClasses).HasSingleItem();
+        await Assert.That(dataClasses).HasSingleItem();
+
+        var dataClass = dataClasses.Single();
 
         await Assert.That(dataClass).IsNotNull();
-        await Assert.That(dataClass!.IsRegistered).IsTrue();
+        await Assert.That(dataClass.IsRegistered).IsTrue();
         await Assert.That(dataClass.IsInitialized).IsTrue();
         await Assert.That(dataClass.IsStarted).IsTrue();
         await Assert.That(dataClass.IsEnded).IsTrue();

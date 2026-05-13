@@ -2,33 +2,37 @@
 
 namespace TUnit.Core;
 
-[RequiresDynamicCode("DependencyInjectionDataSourceAttribute requires dynamic code generation for dependency injection container access. This attribute is inherently incompatible with AOT compilation.")]
-[RequiresUnreferencedCode("DependencyInjectionDataSourceAttribute may require unreferenced code for dependency injection container access. This attribute is inherently incompatible with AOT compilation.")]
 public abstract class DependencyInjectionDataSourceAttribute<TScope> : UntypedDataSourceGeneratorAttribute
 {
     protected override IEnumerable<Func<object?[]?>> GenerateDataSources(DataGeneratorMetadata dataGeneratorMetadata)
     {
-        var scope = CreateScope(dataGeneratorMetadata);
-
-        if (dataGeneratorMetadata.TestBuilderContext != null)
+        yield return () =>
         {
+            // Create a new scope for each test execution
+            var scope = CreateScope(dataGeneratorMetadata);
+
+            // Set up disposal for this specific scope in the current test context
             dataGeneratorMetadata.TestBuilderContext.Current.Events.OnDispose += async (_, _) =>
             {
                 if (scope is IAsyncDisposable asyncDisposable)
                 {
-                    await asyncDisposable.DisposeAsync();
+                    await asyncDisposable.DisposeAsync().ConfigureAwait(false);
                 }
                 else if (scope is IDisposable disposable)
                 {
                     disposable.Dispose();
                 }
             };
-        }
 
-        yield return () =>
-        {
             return dataGeneratorMetadata.MembersToGenerate
-                .Select(m => m.Type)
+                .Select(m => m switch
+                {
+                    PropertyMetadata prop => prop.Type,
+                    ParameterMetadata param => param.Type,
+                    ClassMetadata cls => cls.Type,
+                    MethodMetadata method => method.Type,
+                    _ => throw new InvalidOperationException($"Unknown member type: {m.GetType()}")
+                })
                 .Select(x => Create(scope, x))
                 .ToArray();
         };

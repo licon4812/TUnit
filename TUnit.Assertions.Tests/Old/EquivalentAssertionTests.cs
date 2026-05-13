@@ -95,7 +95,10 @@ public class EquivalentAssertionTests
             { "A", "A" },
         };
 
-        await TUnitAssert.That(dict1).IsEquivalentTo(dict2);
+        // Dictionaries are equivalent regardless of key order by default
+        // Cast both to IEnumerable to use collection equivalency
+        await TUnitAssert.That((IEnumerable<KeyValuePair<string, string>>)dict1)
+            .IsEquivalentTo(dict2);
     }
 
     [Test]
@@ -127,14 +130,13 @@ public class EquivalentAssertionTests
 
         var exception = await TUnitAssert.ThrowsAsync<TUnitAssertionException>(async () => await TUnitAssert.That(array).IsEquivalentTo(list, CollectionOrdering.Matching));
 
-        await TUnitAssert.That(exception!.Message).IsEqualTo(
+        await TUnitAssert.That(exception!.Message.NormalizeLineEndings()).IsEqualTo(
             """
-            Expected array to be equivalent to [1, 2, 3, 4, 5]
-            
-            but it is [1, 5, 2, 3, 4]
-            
+            Expected to be equivalent to [1, 2, 3, 4, 5]
+            but collection item at index 1 does not match: expected 2, but was 5
+
             at Assert.That(array).IsEquivalentTo(list, CollectionOrdering.Matching)
-            """
+            """.NormalizeLineEndings()
         );
     }
 
@@ -147,14 +149,13 @@ public class EquivalentAssertionTests
 
         var exception = await TUnitAssert.ThrowsAsync<TUnitAssertionException>(async () => await TUnitAssert.That(array).IsEquivalentTo(list, CollectionOrdering.Matching));
 
-        await TUnitAssert.That(exception!.Message).IsEqualTo(
+        await TUnitAssert.That(exception!.Message.NormalizeLineEndings()).IsEqualTo(
             """
-            Expected array to be equivalent to [1, 2, 3, 4, 5]
-            
-            but it is [1, 5, 2, 3, 4]
-            
+            Expected to be equivalent to [1, 2, 3, 4, 5]
+            but collection item at index 1 does not match: expected 2, but was 5
+
             at Assert.That(array).IsEquivalentTo(list, CollectionOrdering.Matching)
-            """
+            """.NormalizeLineEndings()
         );
     }
 
@@ -170,17 +171,13 @@ public class EquivalentAssertionTests
 
         var exception = await TUnitAssert.ThrowsAsync<TUnitAssertionException>(async () => await TUnitAssert.That(result1).IsEquivalentTo(result2));
 
-        await TUnitAssert.That(exception!.Message).IsEqualTo(
-            """
-            Expected result1 to be equivalent to result2
-            
-            but Property MyClass.Value did not match
-            Expected: "Foo1"
-            Received: "Foo"
-            
-            at Assert.That(result1).IsEquivalentTo(result2)
-            """
-        );
+        var expectedMessage = $"Expected result1 to be equivalent to result2{Environment.NewLine}" +
+                              $"but Property Value did not match{Environment.NewLine}" +
+                              $"Expected: \"Foo1\"{Environment.NewLine}" +
+                              $"Received: \"Foo\"{Environment.NewLine}" +
+                              $"{Environment.NewLine}" +
+                              $"at Assert.That(result1).IsEquivalentTo(result2)";
+        await TUnitAssert.That(exception!.Message.NormalizeLineEndings().NormalizeLineEndings()).IsEqualTo(expectedMessage.NormalizeLineEndings());
     }
 
     [Test]
@@ -194,17 +191,13 @@ public class EquivalentAssertionTests
 
         var exception = await TUnitAssert.ThrowsAsync<TUnitAssertionException>(async () => await TUnitAssert.That(object1).IsEquivalentTo(object2));
 
-        await TUnitAssert.That(exception!.Message).IsEqualTo(
-            """
-            Expected object1 to be equivalent to object2
-            
-            but Property MyClass.Value did not match
-            Expected: "Foo"
-            Received: null
-            
-            at Assert.That(object1).IsEquivalentTo(object2)
-            """
-            );
+        var expectedMessage = $"Expected object1 to be equivalent to object2{Environment.NewLine}" +
+                              $"but Property Value did not match{Environment.NewLine}" +
+                              $"Expected: Foo{Environment.NewLine}" +
+                              $"Received: null{Environment.NewLine}" +
+                              $"{Environment.NewLine}" +
+                              $"at Assert.That(object1).IsEquivalentTo(object2)";
+        await TUnitAssert.That(exception!.Message.NormalizeLineEndings().NormalizeLineEndings()).IsEqualTo(expectedMessage.NormalizeLineEndings());
     }
 
     [Test]
@@ -234,17 +227,13 @@ public class EquivalentAssertionTests
 
         var exception = await TUnitAssert.ThrowsAsync<TUnitAssertionException>(async () => await TUnitAssert.That(object1).IsEquivalentTo(object2));
 
-        await TUnitAssert.That(exception!.Message).IsEqualTo(
-            """
-            Expected object1 to be equivalent to object2
-            
-            but Property MyClass.Inner.Inner.Value did not match
-            Expected: "Baz"
-            Received: null
-            
-            at Assert.That(object1).IsEquivalentTo(object2)
-            """
-        );
+        var expectedMessage = $"Expected object1 to be equivalent to object2{Environment.NewLine}" +
+                              $"but Property Inner.Inner.Value did not match{Environment.NewLine}" +
+                              $"Expected: Baz{Environment.NewLine}" +
+                              $"Received: null{Environment.NewLine}" +
+                              $"{Environment.NewLine}" +
+                              $"at Assert.That(object1).IsEquivalentTo(object2)";
+        await TUnitAssert.That(exception!.Message.NormalizeLineEndings().NormalizeLineEndings()).IsEqualTo(expectedMessage.NormalizeLineEndings());
     }
 
     [Test]
@@ -370,17 +359,13 @@ public class EquivalentAssertionTests
 
         var exception = await TUnitAssert.ThrowsAsync<TUnitAssertionException>(async () => await TUnitAssert.That(object1).IsEquivalentTo(object2));
 
-        await TUnitAssert.That(exception!.Message).IsEqualTo(
-            """
-            Expected object1 to be equivalent to object2
-            
-            but MyClass.Inner.Inner.Collection.[3] did not match
-            Expected: "4"
-            Received: null
-            
-            at Assert.That(object1).IsEquivalentTo(object2)
-            """
-        );
+        var expectedMessage = $"Expected object1 to be equivalent to object2{Environment.NewLine}" +
+                              $"but Inner.Inner.Collection.[3] did not match{Environment.NewLine}" +
+                              $"Expected: \"4\"{Environment.NewLine}" +
+                              $"Received: null{Environment.NewLine}" +
+                              $"{Environment.NewLine}" +
+                              $"at Assert.That(object1).IsEquivalentTo(object2)";
+        await TUnitAssert.That(exception!.Message.NormalizeLineEndings().NormalizeLineEndings()).IsEqualTo(expectedMessage.NormalizeLineEndings());
     }
 
     [Test]
@@ -505,17 +490,13 @@ public class EquivalentAssertionTests
             async () => await TUnitAssert.That(object1)
                                          .IsEquivalentTo(object2));
 
-        await TUnitAssert.That(exception!.Message).IsEqualTo(
-                             """
-                             Expected object1 to be equivalent to object2
-
-                             but Property MyClass.Inner did not match
-                             Expected: null
-                             Received: TUnit.Assertions.Tests.Old.EquivalentAssertionTests+InnerClass
-
-                             at Assert.That(object1).IsEquivalentTo(object2)
-                             """
-                         );
+        var expectedMessage = $"Expected object1 to be equivalent to object2{Environment.NewLine}" +
+                              $"but Property Inner did not match{Environment.NewLine}" +
+                              $"Expected: null{Environment.NewLine}" +
+                              $"Received: InnerClass{Environment.NewLine}" +
+                              $"{Environment.NewLine}" +
+                              $"at Assert.That(object1).IsEquivalentTo(object2)";
+        await TUnitAssert.That(exception!.Message.NormalizeLineEndings().NormalizeLineEndings()).IsEqualTo(expectedMessage.NormalizeLineEndings());
     }
 
     [Test]
@@ -585,17 +566,13 @@ public class EquivalentAssertionTests
                                          .IsEquivalentTo(object2)
                                          .WithPartialEquivalency());
 
-        await TUnitAssert.That(exception!.Message).IsEqualTo(
-                             """
-                             Expected object1 to be equivalent to object2
-
-                             but Property MyClass.Inner.Value did not match
-                             Expected: "Baz"
-                             Received: "Bar"
-
-                             at Assert.That(object1).IsEquivalentTo(object2)
-                             """
-                         );
+        var expectedMessage = $"Expected object1 to be equivalent to object2{Environment.NewLine}" +
+                              $"but Property Inner.Value did not match{Environment.NewLine}" +
+                              $"Expected: \"Baz\"{Environment.NewLine}" +
+                              $"Received: \"Bar\"{Environment.NewLine}" +
+                              $"{Environment.NewLine}" +
+                              $"at Assert.That(object1).IsEquivalentTo(object2).WithPartialEquivalency()";
+        await TUnitAssert.That(exception!.Message.NormalizeLineEndings().NormalizeLineEndings()).IsEqualTo(expectedMessage.NormalizeLineEndings());
     }
 
     [Test]
@@ -641,17 +618,13 @@ public class EquivalentAssertionTests
             async () => await TUnitAssert.That(object1)
                 .IsEquivalentTo(object2));
 
-        await TUnitAssert.That(exception!.Message).IsEqualTo(
-            """
-            Expected object1 to be equivalent to object2
-
-            but Field MyClassWithMultipleFields.intValue did not match
-            Expected: null
-            Received: 10
-
-            at Assert.That(object1).IsEquivalentTo(object2)
-            """
-        );
+        var expectedMessage = $"Expected object1 to be equivalent to object2{Environment.NewLine}" +
+                              $"but Property intValue did not match{Environment.NewLine}" +
+                              $"Expected: null{Environment.NewLine}" +
+                              $"Received: Int32{Environment.NewLine}" +
+                              $"{Environment.NewLine}" +
+                              $"at Assert.That(object1).IsEquivalentTo(object2)";
+        await TUnitAssert.That(exception!.Message.NormalizeLineEndings().NormalizeLineEndings()).IsEqualTo(expectedMessage.NormalizeLineEndings());
     }
 
     [Test]

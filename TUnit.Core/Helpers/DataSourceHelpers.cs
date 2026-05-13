@@ -1,6 +1,8 @@
-using System.Collections;
+﻿using System.Collections;
+using System.Collections.Concurrent;
 using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
+using TUnit.Core.Interfaces;
 
 namespace TUnit.Core.Helpers;
 
@@ -71,8 +73,6 @@ public static class DataSourceHelpers
     /// <summary>
     /// AOT-compatible tuple unwrapping that handles common tuple types without reflection
     /// </summary>
-    [UnconditionalSuppressMessage("Trimming", "IL2091:Target generic argument does not satisfy 'DynamicallyAccessedMembersAttribute' in target method or type.",
-        Justification = "We handle specific known tuple types without reflection")]
     public static object?[] UnwrapTupleAot(object? value)
     {
         if (value == null)
@@ -86,7 +86,7 @@ public static class DataSourceHelpers
         {
             var length = tuple.Length;
             var result = new object?[length];
-            for (int i = 0; i < length; i++)
+            for (var i = 0; i < length; i++)
             {
                 result[i] = tuple[i];
             }
@@ -141,6 +141,7 @@ public static class DataSourceHelpers
         }
     }
 
+#if !NETSTANDARD2_1_OR_GREATER && !NETCOREAPP
     /// <summary>
     /// Generic tuple unwrapping for when types are known at compile time
     /// </summary>
@@ -164,6 +165,7 @@ public static class DataSourceHelpers
 
     public static object?[] UnwrapTuple<T1, T2, T3, T4, T5, T6, T7>(ValueTuple<T1, T2, T3, T4, T5, T6, T7> tuple)
         => [tuple.Item1, tuple.Item2, tuple.Item3, tuple.Item4, tuple.Item5, tuple.Item6, tuple.Item7];
+#endif
 
     /// <summary>
     /// AOT-compatible data source processor for when the return type is known at compile time
@@ -178,8 +180,9 @@ public static class DataSourceHelpers
         // If it's a Func<TResult>, invoke it first
         var actualData = InvokeIfFunc(data);
 
-        // Initialize the object if it implements IAsyncInitializer
-        await ObjectInitializer.InitializeAsync(actualData);
+        // During discovery, only IAsyncDiscoveryInitializer objects are initialized.
+        // Regular IAsyncInitializer objects are deferred to Execution phase.
+        await ObjectInitializer.InitializeForDiscoveryAsync(actualData);
 
         return actualData;
     }
@@ -198,7 +201,8 @@ public static class DataSourceHelpers
         if (enumerator.MoveNext())
         {
             var value = enumerator.Current;
-            await ObjectInitializer.InitializeAsync(value);
+            // Discovery: only IAsyncDiscoveryInitializer
+            await ObjectInitializer.InitializeForDiscoveryAsync(value);
             return value;
         }
 
@@ -225,14 +229,16 @@ public static class DataSourceHelpers
             if (enumerator.MoveNext())
             {
                 var value = enumerator.Current;
-                await ObjectInitializer.InitializeAsync(value);
+                // Discovery: only IAsyncDiscoveryInitializer
+                await ObjectInitializer.InitializeForDiscoveryAsync(value);
                 return value;
             }
             return null;
         }
 
-        // For non-enumerable types, just initialize and return
-        await ObjectInitializer.InitializeAsync(actualData);
+        // During discovery, only IAsyncDiscoveryInitializer objects are initialized.
+        // Regular IAsyncInitializer objects are deferred to Execution phase.
+        await ObjectInitializer.InitializeForDiscoveryAsync(actualData);
         return actualData;
     }
 
@@ -294,41 +300,6 @@ public static class DataSourceHelpers
         return [() => Task.FromResult<object?>(InvokeIfFunc(data))];
     }
 
-
-    /// <summary>
-    /// AOT-compatible runtime dispatcher for data source property initialization.
-    /// This will be populated by the generated DataSourceHelpers class.
-    /// </summary>
-    private static readonly Dictionary<Type, Func<object, MethodMetadata, string, Task>> PropertyInitializers = new();
-
-    /// <summary>
-    /// Register a type-specific property initializer (called by generated code)
-    /// </summary>
-    public static void RegisterPropertyInitializer<T>(Func<T, MethodMetadata, string, Task> initializer)
-    {
-        PropertyInitializers[typeof(T)] = (instance, testInfo, sessionId) =>
-            initializer((T)instance, testInfo, sessionId);
-    }
-
-    /// <summary>
-    /// Initialize data source properties on an instance using registered type-specific helpers
-    /// </summary>
-    public static async Task InitializeDataSourcePropertiesAsync(object? instance, MethodMetadata testInformation, string testSessionId)
-    {
-        if (instance == null)
-        {
-            return;
-        }
-
-        var instanceType = instance.GetType();
-
-        if (PropertyInitializers.TryGetValue(instanceType, out var initializer))
-        {
-            await initializer(instance, testInformation, testSessionId);
-        }
-        // If no initializer is registered, the type has no data source properties
-    }
-
     public static object?[] ToObjectArray(this object? item)
     {
         item = InvokeIfFunc(item);
@@ -369,6 +340,108 @@ public static class DataSourceHelpers
         return [item];
     }
 
+    /// <summary>
+    /// Converts an item to an object array, considering the expected parameter types.
+    /// This version handles nested tuples correctly by checking if parameters expect tuples.
+    /// </summary>
+    public static object?[] ToObjectArrayWithTypes(this object? item, Type[]? expectedTypes)
+    {
+        item = InvokeIfFunc(item);
+
+        if (item is null)
+        {
+            return [ null ];
+        }
+
+        // Check if it's specifically object?[] (not other array types like string[])
+        if(item is object?[] array && item.GetType().GetElementType() == typeof(object))
+        {
+            return array;
+        }
+
+        // Don't treat strings as character arrays
+        if (item is string)
+        {
+            return [item];
+        }
+
+        // Check if it's any other kind of array (string[], int[], etc.)
+        if (item is Array)
+        {
+            return [item];
+        }
+
+        // Check tuples before IEnumerable because tuples implement IEnumerable
+        // but need special unwrapping logic
+        if (IsTuple(item))
+        {
+            // If we have expected types, handle nested tuples intelligently
+            if (expectedTypes != null && expectedTypes.Length > 0)
+            {
+                // Special case: If there's a single parameter that expects a tuple type,
+                // and the item is a tuple, don't unwrap
+                if (expectedTypes.Length == 1 && TupleHelper.IsTupleType(expectedTypes[0]))
+                {
+                    return [item];
+                }
+
+                return UnwrapTupleWithTypes(item, expectedTypes);
+            }
+            // Fall back to default unwrapping if no type info
+            return UnwrapTupleAot(item);
+        }
+
+        // Don't expand IEnumerable - test methods expect the IEnumerable itself as a parameter
+        return [item];
+    }
+
+    /// <summary>
+    /// Unwraps a tuple considering the expected parameter types.
+    /// Preserves nested tuples when parameters expect tuple types.
+    /// </summary>
+    private static object?[] UnwrapTupleWithTypes(object? value, Type[] expectedTypes)
+    {
+        if (value == null)
+        {
+            return [null];
+        }
+
+#if NET5_0_OR_GREATER || NETCOREAPP3_0_OR_GREATER
+        // Try to use ITuple interface first for any ValueTuple type
+        if (value is ITuple tuple)
+        {
+            var result = new List<object?>();
+            var typeIndex = 0;
+
+            for (var i = 0; i < tuple.Length && typeIndex < expectedTypes.Length; i++)
+            {
+                var element = tuple[i];
+                var expectedType = expectedTypes[typeIndex];
+
+                // Check if the expected type is a tuple type
+                if (TupleHelper.IsTupleType(expectedType) && IsTuple(element))
+                {
+                    // Keep nested tuple as-is
+                    result.Add(element);
+                    typeIndex++;
+                }
+                else
+                {
+                    // Add element normally
+                    result.Add(element);
+                    typeIndex++;
+                }
+            }
+
+            return result.ToArray();
+        }
+#endif
+
+        // Fallback to default unwrapping
+        return UnwrapTupleAot(value);
+    }
+
+
     public static bool IsTuple(object? obj)
     {
         if (obj is null)
@@ -378,7 +451,7 @@ public static class DataSourceHelpers
 
 #if NET5_0_OR_GREATER || NETCOREAPP3_0_OR_GREATER
     // Fast path for modern .NET: ITuple covers all tuple types
-    return obj is System.Runtime.CompilerServices.ITuple;
+    return obj is ITuple;
 #else
         // Fallback: check for known tuple types
         var type = obj.GetType();
@@ -403,5 +476,95 @@ public static class DataSourceHelpers
             genericType == typeof(Tuple<,,,,,>) ||
             genericType == typeof(Tuple<,,,,,,>);
 #endif
+    }
+
+    /// <summary>
+    /// Tries to create an instance using a generated creation method that handles init-only properties.
+    /// Returns true if successful, false if no creator is available.
+    /// </summary>
+    public static async Task<(bool success, object? createdInstance)> TryCreateWithInitializerAsync(Type type, MethodMetadata testInformation, string testSessionId)
+    {
+        // Check if we have a registered creator for this type
+        if (!TypeCreators.TryGetValue(type, out var creator))
+        {
+            return (false, null);
+        }
+
+        // Use the creator to create and initialize the instance
+        var createdInstance = await creator(testInformation, testSessionId).ConfigureAwait(false);
+        return (true, createdInstance);
+    }
+
+    private static readonly ConcurrentDictionary<Type, Func<MethodMetadata, string, Task<object>>> TypeCreators = new();
+
+    /// <summary>
+    /// Registers a type creator function for types with init-only data source properties.
+    /// Called by generated code.
+    /// </summary>
+    public static void RegisterTypeCreator<T>(Func<MethodMetadata, string, Task<T>> creator)
+    {
+        TypeCreators[typeof(T)] = async (metadata, sessionId) => (await creator(metadata, sessionId))!;
+    }
+
+    /// <summary>
+    /// Resolves a data source property value at runtime.
+    /// This method handles all IDataSourceAttribute implementations generically.
+    /// Only used in reflection mode - in AOT/source-gen mode, property injection is handled by generated code.
+    /// </summary>
+    #if NET8_0_OR_GREATER
+    [UnconditionalSuppressMessage("Trimming", "IL2026:Members annotated with 'RequiresUnreferencedCodeAttribute' require dynamic access",
+        Justification = "This method is only used in reflection mode. In AOT/source-gen mode, property injection uses compile-time generated code.")]
+    [UnconditionalSuppressMessage("AOT", "IL3050:Calling members annotated with 'RequiresDynamicCodeAttribute' may break functionality when AOT compiling",
+        Justification = "This method is only used in reflection mode. In AOT/source-gen mode, property injection uses compile-time generated code.")]
+    #endif
+    public static async Task<object?> ResolveDataSourceForPropertyAsync([DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicProperties | DynamicallyAccessedMemberTypes.PublicParameterlessConstructor | DynamicallyAccessedMemberTypes.PublicFields | DynamicallyAccessedMemberTypes.NonPublicFields)] Type containingType, string propertyName, MethodMetadata testInformation, string testSessionId)
+    {
+        // Use PropertyInjectionService to resolve the data source attribute
+        var propertyInfo = containingType.GetProperty(propertyName);
+        if (propertyInfo == null)
+        {
+            return null;
+        }
+
+        var dataSourceAttributes = propertyInfo.GetCustomAttributes(typeof(IDataSourceAttribute), true);
+        if (dataSourceAttributes.Length == 0)
+        {
+            return null;
+        }
+
+        var dataSourceAttribute = (IDataSourceAttribute)dataSourceAttributes[0];
+
+        // Create the data generator metadata with required fields
+        var dataGeneratorMetadata = DataGeneratorMetadataCreator.CreateForPropertyInjection(
+            propertyInfo,
+            containingType,
+            testInformation,
+            dataSourceAttribute,
+            testSessionId,
+            TestContext.Current,
+            TestContext.Current?.Metadata.TestDetails.ClassInstance,
+            TestContext.Current?.InternalEvents,
+            TestContext.Current?.StateBag.Items ?? new ConcurrentDictionary<string, object?>()
+        );
+
+        // Generate the data source value using the attribute's GetDataRowsAsync method
+        var dataRows = dataSourceAttribute.GetDataRowsAsync(dataGeneratorMetadata);
+
+        // Get the first value from the async enumerable
+        await foreach (var factory in dataRows)
+        {
+            var args = await factory();
+            if (args is { Length: > 0 })
+            {
+                var value = args[0];
+
+                // Discovery: only IAsyncDiscoveryInitializer
+                await ObjectInitializer.InitializeForDiscoveryAsync(value);
+
+                return value;
+            }
+        }
+
+        return null;
     }
 }

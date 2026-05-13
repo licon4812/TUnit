@@ -1,0 +1,27 @@
+#if NET8_0_OR_GREATER
+using TUnit.Assertions.Attributes;
+
+namespace TUnit.Assertions.Conditions;
+
+/// <summary>
+/// Source-generated assertions for TimeOnly type using [GenerateAssertion(InlineMethodBody = true)] attributes.
+/// These wrap TimeOnly checks as extension methods.
+/// </summary>
+file static partial class TimeOnlyAssertionExtensions
+{
+    [GenerateAssertion(ExpectationMessage = "to be midnight", InlineMethodBody = true)]
+    public static bool IsMidnight(this TimeOnly value) => value == TimeOnly.MinValue;
+    [GenerateAssertion(ExpectationMessage = "to not be midnight", InlineMethodBody = true)]
+    public static bool IsNotMidnight(this TimeOnly value) => value != TimeOnly.MinValue;
+    [GenerateAssertion(ExpectationMessage = "to be noon", InlineMethodBody = true)]
+    public static bool IsNoon(this TimeOnly value) => value.Hour == 12 && value.Minute == 0 && value.Second == 0 && value.Millisecond == 0;
+    [GenerateAssertion(ExpectationMessage = "to be in the AM", InlineMethodBody = true)]
+    public static bool IsAM(this TimeOnly value) => value.Hour < 12;
+    [GenerateAssertion(ExpectationMessage = "to be in the PM", InlineMethodBody = true)]
+    public static bool IsPM(this TimeOnly value) => value.Hour >= 12;
+    [GenerateAssertion(ExpectationMessage = "to be at the start of the hour", InlineMethodBody = true)]
+    public static bool IsStartOfHour(this TimeOnly value) => value.Minute == 0 && value.Second == 0 && value.Millisecond == 0;
+    [GenerateAssertion(ExpectationMessage = "to be at the end of the hour", InlineMethodBody = true)]
+    public static bool IsEndOfHour(this TimeOnly value) => value.Minute == 59 && value.Second == 59 && value.Millisecond == 999;
+}
+#endif

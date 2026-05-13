@@ -1,3 +1,4 @@
+using System.Diagnostics.CodeAnalysis;
 using TUnit.Core;
 
 namespace TUnit.Engine.Scheduling;
@@ -5,13 +6,16 @@ namespace TUnit.Engine.Scheduling;
 /// <summary>
 /// Defines the contract for test scheduling strategies
 /// </summary>
-public interface ITestScheduler
+internal interface ITestScheduler
 {
     /// <summary>
     /// Schedules and executes tests with optimal parallelization
     /// </summary>
-    Task ScheduleAndExecuteAsync(
-        IEnumerable<AbstractExecutableTest> tests,
-        ITestExecutor executor,
+    /// <returns>True if successful, false if After(TestSession) hooks failed</returns>
+    #if NET8_0_OR_GREATER
+    [RequiresUnreferencedCode("Test execution involves reflection for hooks and initialization")]
+    #endif
+    Task<bool> ScheduleAndExecuteAsync(
+        List<AbstractExecutableTest> tests,
         CancellationToken cancellationToken);
 }

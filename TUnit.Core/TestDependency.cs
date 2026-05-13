@@ -15,27 +15,40 @@ public sealed class TestDependency : IEquatable<TestDependency>
 
     public int MethodGenericArity { get; init; }
 
-    public static TestDependency FromMethodName(string methodName)
-    {
-        return new TestDependency { MethodName = methodName };
-    }
+    /// <summary>
+    /// Gets or sets a value indicating whether this test should proceed even if its dependencies have failed.
+    /// When set to false (default), the test will be skipped if any of its dependencies failed.
+    /// When set to true, the test will run even if its dependencies failed.
+    /// </summary>
+    public bool ProceedOnFailure { get; init; }
 
-    public static TestDependency FromClass(Type classType)
+    public static TestDependency FromMethodName(string methodName, bool proceedOnFailure = false)
     {
         return new TestDependency
         {
-            ClassType = classType,
-            ClassGenericArity = classType.IsGenericTypeDefinition ? classType.GetGenericArguments().Length : 0
+            MethodName = methodName,
+            ProceedOnFailure = proceedOnFailure
         };
     }
 
-    public static TestDependency FromClassAndMethod(Type classType, string methodName)
+    public static TestDependency FromClass(Type classType, bool proceedOnFailure = false)
     {
         return new TestDependency
         {
             ClassType = classType,
             ClassGenericArity = classType.IsGenericTypeDefinition ? classType.GetGenericArguments().Length : 0,
-            MethodName = methodName
+            ProceedOnFailure = proceedOnFailure
+        };
+    }
+
+    public static TestDependency FromClassAndMethod(Type classType, string methodName, bool proceedOnFailure = false)
+    {
+        return new TestDependency
+        {
+            ClassType = classType,
+            ClassGenericArity = classType.IsGenericTypeDefinition ? classType.GetGenericArguments().Length : 0,
+            MethodName = methodName,
+            ProceedOnFailure = proceedOnFailure
         };
     }
 
@@ -45,32 +58,53 @@ public sealed class TestDependency : IEquatable<TestDependency>
         {
             var testClassType = test.TestClassType;
 
-            if (ClassType.IsGenericTypeDefinition && testClassType.IsGenericType)
+            if (ClassType.IsGenericTypeDefinition)
             {
-                if (testClassType.GetGenericTypeDefinition() != ClassType)
+                // Early exit if test class type has no generic inheritance at all
+                if (testClassType is { IsGenericType: false, BaseType: null })
                 {
-                    var currentType = testClassType.BaseType;
+                    return false;
+                }
+                
+                // Quick check: if test class type is generic and matches directly, we're done
+                if (testClassType.IsGenericType && testClassType.GetGenericTypeDefinition() == ClassType)
+                {
+                    // Direct match found, continue to method checks
+                }
+                else
+                {
+                    // Only traverse inheritance if we have a base type and it's likely to be generic
                     var found = false;
-                    while (currentType != null && !found)
+                    var currentType = testClassType.BaseType;
+                    var depth = 0;
+                    const int maxInheritanceDepth = 10; // Reduced from 50 to 10 for better performance
+                    
+                    while (currentType != null && !found && depth < maxInheritanceDepth)
                     {
+                        // Only check generic types to avoid unnecessary reflection calls
                         if (currentType.IsGenericType && currentType.GetGenericTypeDefinition() == ClassType)
                         {
                             found = true;
                         }
                         currentType = currentType.BaseType;
+                        depth++;
                     }
+                    
                     if (!found)
                     {
                         return false;
                     }
                 }
+                
+                // For generic type definitions, we don't need to check arity against the test class
+                // because the test class may inherit from a closed generic version of the dependency
             }
             else if (!ClassType.IsAssignableFrom(testClassType))
             {
                 return false;
             }
 
-            if (ClassGenericArity > 0)
+            if (ClassGenericArity > 0 && !ClassType.IsGenericTypeDefinition)
             {
                 var testGenericArgs = testClassType.IsGenericType
                     ? testClassType.GetGenericArguments().Length
@@ -83,7 +117,10 @@ public sealed class TestDependency : IEquatable<TestDependency>
         }
         else if (dependentTest != null)
         {
-            if (test.TestClassType != dependentTest.TestClassType)
+            var testType = test.TestClassType;
+            var dependentType = dependentTest.TestClassType;
+            
+            if (testType != dependentType)
             {
                 return false;
             }
@@ -96,34 +133,26 @@ public sealed class TestDependency : IEquatable<TestDependency>
                 return false;
             }
 
+            if(test.MethodMetadata.GenericTypeCount != MethodGenericArity)
+            {
+                return false;
+            }
+
             if (MethodParameters != null)
             {
-                var testParams = test.TestMethodParameterTypes ?? [
-                ];
-                if (testParams.Length != MethodParameters.Length)
+                var testParams = test.MethodMetadata.Parameters;
+
+                if (testParams.Length != MethodParameters.Length
+                    || !testParams.Select(x => x.Type).SequenceEqual(MethodParameters!))
                 {
                     return false;
                 }
-
-                for (var i = 0; i < MethodParameters.Length; i++)
-                {
-                    if (testParams[i] != MethodParameters[i].FullName)
-                    {
-                        return false;
-                    }
-                }
-            }
-
-            if (MethodGenericArity > 0)
-            {
-                // This would need to be added to TestMetadata if we want to support it
-                // For now, we'll skip this check
             }
         }
 
         if (ClassType != null && string.IsNullOrEmpty(MethodName) && dependentTest != null)
         {
-            if (test.TestClassType == dependentTest.TestClassType && 
+            if (test.TestClassType == dependentTest.TestClassType &&
                 test.TestMethodName == dependentTest.TestMethodName)
             {
                 return false;
@@ -148,8 +177,8 @@ public sealed class TestDependency : IEquatable<TestDependency>
                ClassGenericArity == other.ClassGenericArity &&
                MethodName == other.MethodName &&
                MethodGenericArity == other.MethodGenericArity &&
-               (MethodParameters?.SequenceEqual(other.MethodParameters ?? [
-                   ]) ??
+               ProceedOnFailure == other.ProceedOnFailure &&
+               (MethodParameters?.SequenceEqual(other.MethodParameters ?? []) ??
                 other.MethodParameters == null);
     }
 
@@ -164,6 +193,7 @@ public sealed class TestDependency : IEquatable<TestDependency>
             hash = hash * 31 + ClassGenericArity.GetHashCode();
             hash = hash * 31 + (MethodName?.GetHashCode() ?? 0);
             hash = hash * 31 + MethodGenericArity.GetHashCode();
+            hash = hash * 31 + ProceedOnFailure.GetHashCode();
             if (MethodParameters != null)
             {
                 foreach (var param in MethodParameters)
@@ -197,6 +227,11 @@ public sealed class TestDependency : IEquatable<TestDependency>
             {
                 parts.Add($"Params=[{string.Join(", ", MethodParameters.Select(p => p.Name))}]");
             }
+        }
+
+        if (ProceedOnFailure)
+        {
+            parts.Add("ProceedOnFailure=true");
         }
 
         return $"TestDependency({string.Join(", ", parts)})";

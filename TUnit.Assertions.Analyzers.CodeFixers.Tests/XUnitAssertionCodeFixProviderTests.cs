@@ -150,4 +150,363 @@ public class XUnitAssertionCodeFixProviderTests
             """
             );
     }
+
+    [Test]
+    public async Task Xunit_All_Converts_To_AssertMultiple_WithForeach()
+    {
+        await Verifier
+            .VerifyCodeFixAsync(
+                """
+                using System.Threading.Tasks;
+
+                public class MyClass
+                {
+                    public void MyTest()
+                    {
+                        var users = new[]
+                        {
+                            new User { Name = "Alice", Age = 25 },
+                            new User { Name = "Bob", Age = 30 }
+                        };
+
+                        {|#0:Xunit.Assert.All(users, user =>
+                        {
+                            {|#1:Xunit.Assert.NotNull(user.Name)|};
+                            {|#2:Xunit.Assert.True(user.Age > 18)|};
+                        })|};
+                    }
+                }
+
+                public class User
+                {
+                    public string Name { get; init; }
+                    public int Age { get; init; }
+                }
+                """,
+                [
+                    Verifier.Diagnostic(Rules.XUnitAssertion).WithLocation(0),
+                    Verifier.Diagnostic(Rules.XUnitAssertion).WithLocation(1),
+                    Verifier.Diagnostic(Rules.XUnitAssertion).WithLocation(2)
+                ],
+                """
+                using System.Threading.Tasks;
+
+                public class MyClass
+                {
+                    public async Task MyTest()
+                    {
+                        var users = new[]
+                        {
+                            new User { Name = "Alice", Age = 25 },
+                            new User { Name = "Bob", Age = 30 }
+                        };
+                        using (Assert.Multiple())
+                        {
+                            foreach (var user in users)
+                            {
+                                await Assert.That(user.Name).IsNotNull();
+                                await Assert.That(user.Age > 18).IsTrue();
+                            }
+                        }
+                    }
+                }
+
+                public class User
+                {
+                    public string Name { get; init; }
+                    public int Age { get; init; }
+                }
+                """
+            );
+    }
+
+    [Test]
+    public async Task Xunit_True_Without_Message()
+    {
+        await Verifier
+            .VerifyCodeFixAsync(
+                """
+                using System.Threading.Tasks;
+
+                public class MyClass
+                {
+                    public void MyTest()
+                    {
+                        bool result = true;
+                        {|#0:Xunit.Assert.True(result)|};
+                    }
+                }
+                """,
+                Verifier.Diagnostic(Rules.XUnitAssertion)
+                    .WithLocation(0),
+                """
+                using System.Threading.Tasks;
+
+                public class MyClass
+                {
+                    public void MyTest()
+                    {
+                        bool result = true;
+                        Assert.That(result).IsTrue();
+                    }
+                }
+                """
+            );
+    }
+
+    [Test]
+    public async Task Xunit_True_With_Message()
+    {
+        await Verifier
+            .VerifyCodeFixAsync(
+                """
+                using System.Threading.Tasks;
+
+                public class MyClass
+                {
+                    public void MyTest()
+                    {
+                        bool result = true;
+                        {|#0:Xunit.Assert.True(result, "user message if false")|};
+                    }
+                }
+                """,
+                Verifier.Diagnostic(Rules.XUnitAssertion)
+                    .WithLocation(0),
+                """
+                using System.Threading.Tasks;
+
+                public class MyClass
+                {
+                    public void MyTest()
+                    {
+                        bool result = true;
+                        Assert.That(result).IsTrue().Because("user message if false");
+                    }
+                }
+                """
+            );
+    }
+
+    [Test]
+    public async Task Xunit_False_Without_Message()
+    {
+        await Verifier
+            .VerifyCodeFixAsync(
+                """
+                using System.Threading.Tasks;
+
+                public class MyClass
+                {
+                    public void MyTest()
+                    {
+                        bool result = false;
+                        {|#0:Xunit.Assert.False(result)|};
+                    }
+                }
+                """,
+                Verifier.Diagnostic(Rules.XUnitAssertion)
+                    .WithLocation(0),
+                """
+                using System.Threading.Tasks;
+
+                public class MyClass
+                {
+                    public void MyTest()
+                    {
+                        bool result = false;
+                        Assert.That(result).IsFalse();
+                    }
+                }
+                """
+            );
+    }
+
+    [Test]
+    public async Task Xunit_False_With_Message()
+    {
+        await Verifier
+            .VerifyCodeFixAsync(
+                """
+                using System.Threading.Tasks;
+
+                public class MyClass
+                {
+                    public void MyTest()
+                    {
+                        bool result = false;
+                        {|#0:Xunit.Assert.False(result, "user message if true")|};
+                    }
+                }
+                """,
+                Verifier.Diagnostic(Rules.XUnitAssertion)
+                    .WithLocation(0),
+                """
+                using System.Threading.Tasks;
+
+                public class MyClass
+                {
+                    public void MyTest()
+                    {
+                        bool result = false;
+                        Assert.That(result).IsFalse().Because("user message if true");
+                    }
+                }
+                """
+            );
+    }
+
+    [Test]
+    public async Task Xunit_Fail_With_Message()
+    {
+        await Verifier
+            .VerifyCodeFixAsync(
+                """
+                using System.Threading.Tasks;
+
+                public class MyClass
+                {
+                    public void MyTest()
+                    {
+                        {|#0:Xunit.Assert.Fail("test failure message")|};
+                    }
+                }
+                """,
+                Verifier.Diagnostic(Rules.XUnitAssertion)
+                    .WithLocation(0),
+                """
+                using System.Threading.Tasks;
+
+                public class MyClass
+                {
+                    public void MyTest()
+                    {
+                        Fail.Test("test failure message");
+                    }
+                }
+                """
+            );
+    }
+
+    [Test]
+    public async Task Xunit_Skip_With_Reason()
+    {
+        await Verifier
+            .VerifyCodeFixAsync(
+                """
+                using System.Threading.Tasks;
+
+                public class MyClass
+                {
+                    public void MyTest()
+                    {
+                        {|#0:Xunit.Assert.Skip("skipping because of reason")|};
+                    }
+                }
+                """,
+                Verifier.Diagnostic(Rules.XUnitAssertion)
+                    .WithLocation(0),
+                """
+                using System.Threading.Tasks;
+
+                public class MyClass
+                {
+                    public void MyTest()
+                    {
+                        Skip.Test("skipping because of reason");
+                    }
+                }
+                """
+            );
+    }
+
+    [Test]
+    public async Task Xunit_Single_With_Predicate_Preserves_Lambda()
+    {
+        await Verifier
+            .VerifyCodeFixAsync(
+                """
+                using System.Threading.Tasks;
+                using System.Collections.Generic;
+
+                public class MyClass
+                {
+                    public void MyTest()
+                    {
+                        var properties = new List<Property>
+                        {
+                            new Property { Prop = "myKey" }
+                        };
+
+                        {|#0:Xunit.Assert.Single(properties, p => p.Prop == "myKey")|};
+                    }
+                }
+
+                public class Property
+                {
+                    public string Prop { get; set; }
+                }
+                """,
+                Verifier.Diagnostic(Rules.XUnitAssertion)
+                    .WithLocation(0),
+                """
+                using System.Threading.Tasks;
+                using System.Collections.Generic;
+
+                public class MyClass
+                {
+                    public void MyTest()
+                    {
+                        var properties = new List<Property>
+                        {
+                            new Property { Prop = "myKey" }
+                        };
+
+                        Assert.That(properties).HasSingleItem(p => p.Prop == "myKey");
+                    }
+                }
+
+                public class Property
+                {
+                    public string Prop { get; set; }
+                }
+                """
+            );
+    }
+
+    [Test]
+    public async Task Xunit_Single_Without_Predicate()
+    {
+        await Verifier
+            .VerifyCodeFixAsync(
+                """
+                using System.Threading.Tasks;
+                using System.Collections.Generic;
+
+                public class MyClass
+                {
+                    public void MyTest()
+                    {
+                        var items = new List<int> { 42 };
+                        {|#0:Xunit.Assert.Single(items)|};
+                    }
+                }
+                """,
+                Verifier.Diagnostic(Rules.XUnitAssertion)
+                    .WithLocation(0),
+                """
+                using System.Threading.Tasks;
+                using System.Collections.Generic;
+
+                public class MyClass
+                {
+                    public void MyTest()
+                    {
+                        var items = new List<int> { 42 };
+                        Assert.That(items).HasSingleItem();
+                    }
+                }
+                """
+            );
+    }
 }

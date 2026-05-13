@@ -1,4 +1,4 @@
-﻿namespace TUnit.Assertions.Tests.AssertConditions;
+namespace TUnit.Assertions.Tests.AssertConditions;
 
 public class BecauseTests
 {
@@ -54,10 +54,9 @@ public class BecauseTests
     public async Task Without_Because_Use_Empty_String()
     {
         var expectedMessage = """
-                              Expected variable to be equal to False
-                              
+                              Expected to be false
                               but found True
-                              
+
                               at Assert.That(variable).IsFalse()
                               """;
 
@@ -69,19 +68,18 @@ public class BecauseTests
         };
 
         var exception = await Assert.ThrowsAsync<AssertionException>(action);
-        await Assert.That(exception.Message).IsEqualTo(expectedMessage);
+        await Assert.That(exception.Message.NormalizeLineEndings()).IsEqualTo(expectedMessage.NormalizeLineEndings());
     }
 
     [Test]
     public async Task Apply_Because_Reasons_Only_On_Previous_Assertions()
     {
         var expectedMessage = """
-                              Expected variable to be equal to True, because we only apply it to previous assertions
-                               and to be equal to False
-                              
+                              Expected to be true, because we only apply it to previous assertions
+                              	and to be false
                               but found True
-                              
-                              at Assert.That(variable).IsTrue().And.IsFalse()
+
+                              at Assert.That(variable).IsTrue().Because("we only apply it to previous assertions").And.IsFalse()
                               """;
         var because = "we only apply it to previous assertions";
         var variable = true;
@@ -93,7 +91,7 @@ public class BecauseTests
         };
 
         var exception = await Assert.ThrowsAsync<AssertionException>(action);
-        await Assert.That(exception.Message).IsEqualTo(expectedMessage);
+        await Assert.That(exception.Message.NormalizeLineEndings()).IsEqualTo(expectedMessage.NormalizeLineEndings());
     }
 
     [Test]
@@ -145,5 +143,27 @@ public class BecauseTests
 
         var exception = await Assert.ThrowsAsync<AssertionException>(action);
         await Assert.That(exception.Message).Contains(because1).And.Contains(because2);
+    }
+
+    [Test]
+    public async Task Because_Message_Appears_Inline_With_Expectation()
+    {
+        var expectedMessage = """
+                              Expected to be false, because this is the reason
+                              but found True
+
+                              at Assert.That(variable).IsFalse().Because("this is the reason")
+                              """;
+
+        var variable = true;
+
+        var action = async () =>
+        {
+            await Assert.That(variable).IsFalse().Because("this is the reason");
+        };
+
+        var exception = await Assert.ThrowsAsync<AssertionException>(action);
+        await Assert.That(exception.Message.NormalizeLineEndings())
+            .IsEqualTo(expectedMessage.NormalizeLineEndings());
     }
 }

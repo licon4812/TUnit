@@ -1,3 +1,5 @@
+﻿using System.Diagnostics.CodeAnalysis;
+
 namespace TUnit.Core;
 
 /// <summary>
@@ -5,9 +7,11 @@ namespace TUnit.Core;
 /// </summary>
 public class DynamicTestBuilderContext
 {
-    private readonly List<DynamicTest> _tests =
+    private readonly List<AbstractDynamicTest> _tests =
     [
     ];
+
+    private int _nextIndex = 1; // Start at 1 to match loop index convention used by regular data sources
 
     public DynamicTestBuilderContext(string filePath, int lineNumber)
     {
@@ -18,10 +22,23 @@ public class DynamicTestBuilderContext
     public string FilePath { get; }
     public int LineNumber { get; }
 
-    public IReadOnlyList<DynamicTest> Tests => _tests.AsReadOnly();
+    public IReadOnlyList<AbstractDynamicTest> Tests => _tests.AsReadOnly();
 
-    public void AddTest(DynamicTest test)
+    #if NET8_0_OR_GREATER
+    [RequiresUnreferencedCode("Adding dynamic tests requires reflection which is not supported in native AOT scenarios.")]
+    #endif
+    public void AddTest(AbstractDynamicTest test)
     {
+        // Set creator location if the test implements IDynamicTestCreatorLocation
+        if (test is IDynamicTestCreatorLocation testWithLocation)
+        {
+            testWithLocation.CreatorFilePath = FilePath;
+            testWithLocation.CreatorLineNumber = LineNumber;
+        }
+
+        // Assign unique index for test ID generation
+        test.DynamicTestIndex = _nextIndex++;
+
         _tests.Add(test);
     }
 }

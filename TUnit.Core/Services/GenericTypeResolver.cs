@@ -1,4 +1,4 @@
-using System.Diagnostics.CodeAnalysis;
+﻿using System.Diagnostics.CodeAnalysis;
 using System.Reflection;
 using TUnit.Core.Exceptions;
 using TUnit.Core.Interfaces;
@@ -8,8 +8,9 @@ namespace TUnit.Core.Services;
 /// <summary>
 /// Implementation of generic type resolution for test methods and classes
 /// </summary>
-[RequiresDynamicCode("Generic type resolution requires runtime type generation")]
-[RequiresUnreferencedCode("Generic type resolution may access types not preserved by trimming")]
+#if NET8_0_OR_GREATER
+[RequiresUnreferencedCode("Generic type resolution requires runtime type generation")]
+#endif
 public class GenericTypeResolver : IGenericTypeResolver
 {
     /// <inheritdoc />

@@ -1,42 +1,31 @@
-﻿using TUnit.Assertions.AssertConditions.Throws;
-
-namespace TUnit.Assertions.Tests.Bugs;
+﻿namespace TUnit.Assertions.Tests.Bugs;
 
 public class Tests2145
 {
     [Test]
     public async Task TestFailMessage()
     {
-        await Assert.That(async () =>
+        var exception = await Assert.ThrowsAsync<AssertionException>(async () =>
             {
                 var val = "hello";
 
                 using var _ = Assert.Multiple();
                 await Assert.That(val).IsEqualTo("world");
                 await Assert.That(val).IsEqualTo("World");
-            }).Throws<AssertionException>()
-            .WithMessage(
-                """
-                Expected val to be equal to "world"
-                
-                but found "hello" which differs at index 0:
-                    ↓
-                   "hello"
-                   "world"
-                    ↑
+            });
+
+        var expectedMessage = """
+                Expected to be equal to "world"
+                but received "hello"
 
                 at Assert.That(val).IsEqualTo("world")
 
-                Expected val to be equal to "World"
-                
-                but found "hello" which differs at index 0:
-                    ↓
-                   "hello"
-                   "World"
-                    ↑
+                Expected to be equal to "World"
+                but received "hello"
 
                 at Assert.That(val).IsEqualTo("World")
-                """
-            );
+                """;
+
+        await Assert.That(exception!.Message.NormalizeLineEndings()).IsEqualTo(expectedMessage.NormalizeLineEndings());
     }
 }

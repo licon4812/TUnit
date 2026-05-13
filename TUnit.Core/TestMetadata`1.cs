@@ -1,5 +1,4 @@
 using System.Diagnostics.CodeAnalysis;
-using TUnit.Core.Helpers;
 using TUnit.Core.Interfaces;
 
 namespace TUnit.Core;
@@ -14,6 +13,7 @@ public class TestMetadata<
 {
     private Func<Type[], object?[], T>? _instanceFactory;
     private Func<T, object?[], Task>? _testInvoker;
+    private Func<ExecutableTestCreationContext, TestMetadata, AbstractExecutableTest>? _cachedExecutableTestFactory;
 
     /// <summary>
     /// Strongly typed instance factory
@@ -24,7 +24,6 @@ public class TestMetadata<
         init
         {
             _instanceFactory = value;
-            // Also set the base class property with a wrapper
             if (value != null)
             {
                 base.InstanceFactory = (typeArgs, args) => value(typeArgs, args);
@@ -41,7 +40,6 @@ public class TestMetadata<
         init
         {
             _testInvoker = value;
-            // Also set the base class property with a wrapper
             if (value != null)
             {
                 base.TestInvoker = (instance, args) => value((T)instance, args);
@@ -52,66 +50,74 @@ public class TestMetadata<
 
     /// <summary>
     /// Strongly typed test invoker with CancellationToken support.
-    /// Used by source generation mode.
+    /// Used by source generation mode (per-method delegates, generic/inherited tests).
     /// </summary>
-    public Func<T, object?[], CancellationToken, Task>? InvokeTypedTest { get; init; }
+    public Func<T, object?[], CancellationToken, ValueTask>? InvokeTypedTest { get; init; }
 
+    /// <summary>
+    /// Class-shared indexed invoker emitted by the source generator. All tests in a class share this
+    /// delegate and dispatch via <see cref="MethodIndex"/>, so the TestEntry → TestMetadata bridge can
+    /// forward the static delegate without allocating a per-test closure capturing <c>this</c>.
+    /// </summary>
+    internal Func<T, int, object?[], CancellationToken, ValueTask>? IndexedInvokeBody { get; init; }
 
+    /// <summary>
+    /// Index passed to <see cref="IndexedInvokeBody"/>. Unused unless that property is set.
+    /// </summary>
+    internal int MethodIndex { get; init; }
 
     /// <summary>
     /// Factory delegate that creates an ExecutableTest for this metadata.
+    /// Uses a static factory method so the cached delegate is a pure method reference —
+    /// no closure, and per-test state is stored on the returned <see cref="ExecutableTest{T}"/>
+    /// instead of in captured lambdas.
     /// </summary>
     public override Func<ExecutableTestCreationContext, TestMetadata, AbstractExecutableTest> CreateExecutableTestFactory
     {
         get
         {
-            // For AOT mode, create delegates from the strongly-typed ones
-            if (InstanceFactory != null && InvokeTypedTest != null)
+            // Volatile-equivalent read via Interlocked pattern mirrors TestEntry's cached-delegate
+            // idiom: first reader computes, subsequent racers lose the CompareExchange and fall
+            // through to re-read the now-published field. Keeps this allocation-free on the fast
+            // path while guaranteeing publication on weakly-ordered architectures.
+            var cached = _cachedExecutableTestFactory;
+            if (cached != null)
             {
-                return (context, metadata) =>
-                {
-                    var typedMetadata = (TestMetadata<T>)metadata;
-
-                    // Create instance delegate that uses context
-                    Func<TestContext, Task<object>> createInstance = async testContext =>
-                    {
-                        // Try to create instance with ClassConstructor attribute
-                        var attributes = metadata.AttributeFactory();
-                        var instance = await ClassConstructorHelper.TryCreateInstanceWithClassConstructor(
-                            attributes,
-                            TestClassType,
-                            metadata.TestSessionId,
-                            testContext);
-
-                        if (instance != null)
-                        {
-                            return instance;
-                        }
-
-                        // Fall back to default instance factory
-                        var typeArgs = testContext.TestDetails.MethodMetadata.Class.Parameters.Select(x => x.Type).ToArray();
-                        return typedMetadata.InstanceFactory!(typeArgs, context.ClassArguments);
-                    };
-
-                    // Convert InvokeTypedTest to the expected signature
-                    Func<object, object?[], TestContext, CancellationToken, Task> invokeTest = async (instance, args, testContext, cancellationToken) =>
-                    {
-                        await typedMetadata.InvokeTypedTest!((T)instance, args, cancellationToken);
-                    };
-
-                    return new ExecutableTest(createInstance, invokeTest)
-                    {
-                        TestId = context.TestId,
-                        Metadata = metadata,
-                        Arguments = context.Arguments,
-                        ClassArguments = context.ClassArguments,
-                        Context = context.Context
-                    };
-                };
+                return cached;
             }
 
-            throw new InvalidOperationException($"InstanceFactory and InvokeTypedTest must be set for {typeof(T).Name}");
+            if (InstanceFactory != null && (InvokeTypedTest != null || IndexedInvokeBody != null))
+            {
+                Interlocked.CompareExchange<Func<ExecutableTestCreationContext, TestMetadata, AbstractExecutableTest>?>(
+                    ref _cachedExecutableTestFactory, CreateTypedExecutableTest, null);
+                return _cachedExecutableTestFactory!;
+            }
+
+            // Delegating the throw to a helper keeps this getter itself throw-free (Sonar S2372) —
+            // the abstract base declares this as a property so it must stay a property, and the
+            // misconfiguration is a programmer error rather than a recoverable condition.
+            return ThrowMissingInvoker();
         }
+    }
+
+    [DoesNotReturn]
+    private static Func<ExecutableTestCreationContext, TestMetadata, AbstractExecutableTest> ThrowMissingInvoker() =>
+        throw new InvalidOperationException(
+            $"InstanceFactory and an invoker (InvokeTypedTest or IndexedInvokeBody) must be set for {typeof(T).Name}");
+
+    private static AbstractExecutableTest CreateTypedExecutableTest(
+        ExecutableTestCreationContext context,
+        TestMetadata metadata)
+    {
+        var typedMetadata = (TestMetadata<T>)metadata;
+        return new ExecutableTest<T>(typedMetadata, context)
+        {
+            TestId = context.TestId,
+            Metadata = metadata,
+            Arguments = context.Arguments,
+            ClassArguments = context.ClassArguments,
+            Context = context.Context
+        };
     }
 
     /// <summary>

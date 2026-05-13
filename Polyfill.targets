@@ -1,0 +1,8 @@
+<Project>
+    <!-- Polyfill is already added by Directory.Build.props for internal projects -->
+    <!-- For NuGet consumers, it's added by TUnit.Core.targets with embedded attributes -->
+
+    <ItemGroup Condition="'$(TargetFrameworkIdentifier)'!='.NETCoreApp'">
+        <PackageReference Include="System.Threading.Tasks.Extensions" />
+    </ItemGroup>
+</Project>

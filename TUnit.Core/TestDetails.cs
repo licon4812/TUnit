@@ -1,12 +1,31 @@
+using System.Collections.Concurrent;
+using System.Collections.ObjectModel;
+using System.Diagnostics.CodeAnalysis;
+using TUnit.Core.Interfaces;
+
 namespace TUnit.Core;
 
 /// <summary>
-/// Simplified test details for the new architecture
+/// Contains detailed metadata about a test, including its identity, class type, method information,
+/// arguments, timeout, retry settings, categories, and custom properties.
+/// Access via <see cref="TestContext.Metadata"/> and its <see cref="Interfaces.ITestMetadata.TestDetails"/> property.
 /// </summary>
-public class TestDetails
+public partial class TestDetails : ITestIdentity, ITestClass, ITestMethod, ITestConfiguration, ITestLocation, ITestDetailsMetadata
 {
+    private readonly IReadOnlyList<Attribute> _allAttributes;
+
+    // Zero-allocation interface properties for organized API access
+    public ITestIdentity Identity => this;
+    public ITestClass Class => this;
+    public ITestMethod Method => this;
+    public ITestConfiguration Configuration => this;
+    public ITestLocation Location => this;
+    public ITestDetailsMetadata Attributes => this;
+
+
     public required string TestId { get; init; }
     public required string TestName { get; init; }
+    [DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicConstructors | DynamicallyAccessedMemberTypes.PublicProperties | DynamicallyAccessedMemberTypes.PublicMethods)]
     public required Type ClassType { get; init; }
     public required string MethodName { get; init; }
     public required object ClassInstance { get; set; }
@@ -15,27 +34,96 @@ public class TestDetails
     public TimeSpan? Timeout { get; set; }
     public int RetryLimit { get; set; }
 
+    /// <summary>
+    /// Gets or sets the initial delay in milliseconds before the first retry.
+    /// Used with <see cref="RetryBackoffMultiplier"/> for exponential backoff.
+    /// </summary>
+    public int RetryBackoffMs { get; set; }
+
+    /// <summary>
+    /// Gets or sets the multiplier for exponential backoff between retries.
+    /// Default is 2.0.
+    /// </summary>
+    public double RetryBackoffMultiplier { get; set; } = 2.0;
+
     public required MethodMetadata MethodMetadata { get; set; }
     public string TestFilePath { get; set; } = "";
     public int TestLineNumber { get; set; }
     public required Type ReturnType { get; set; }
-    public IDictionary<string, object?> TestClassInjectedPropertyArguments { get; init; } = new Dictionary<string, object?>();
-    public Type[]? TestMethodParameterTypes { get; set; }
-    public List<string> Categories { get; } =
-    [
-    ];
+    // Lazy — the vast majority of tests use zero injected properties, so we skip the
+    // per-test ConcurrentDictionary allocation (~200+ bytes) until there's actually
+    // something to store.
+    private ConcurrentDictionary<string, object?>? _testClassInjectedPropertyArguments;
+
+    public IDictionary<string, object?> TestClassInjectedPropertyArguments
+    {
+        get => _testClassInjectedPropertyArguments ?? EmptyInjectedPropertyArguments.Instance;
+        init => _testClassInjectedPropertyArguments = value switch
+        {
+            null => null,
+            ConcurrentDictionary<string, object?> cd => cd,
+            _ => new ConcurrentDictionary<string, object?>(value)
+        };
+    }
+
+    internal ConcurrentDictionary<string, object?> GetOrCreateInjectedPropertyArguments()
+    {
+        var existing = _testClassInjectedPropertyArguments;
+        if (existing != null)
+        {
+            return existing;
+        }
+
+        var created = new ConcurrentDictionary<string, object?>();
+        return Interlocked.CompareExchange(ref _testClassInjectedPropertyArguments, created, null) ?? created;
+    }
+
+    private static class EmptyInjectedPropertyArguments
+    {
+        public static readonly IDictionary<string, object?> Instance =
+            new ReadOnlyDictionary<string, object?>(new Dictionary<string, object?>(0));
+    }
+    public List<string> Categories { get; } = [];
     public Dictionary<string, List<string>> CustomProperties { get; } = new();
     public Type[]? TestClassParameterTypes { get; set; }
 
-    public required IReadOnlyList<Attribute> Attributes { get; init; }
-    public object?[] ClassMetadataArguments => TestClassArguments;
-    
+    public required IReadOnlyDictionary<Type, IReadOnlyList<Attribute>> AttributesByType { get; init; }
+
+    public TestDetails(IReadOnlyList<Attribute> allAttributes)
+    {
+        _allAttributes = allAttributes;
+    }
+
+    /// <summary>
+    /// Checks if the test has an attribute of the specified type.
+    /// </summary>
+    /// <typeparam name="T">The attribute type to check for.</typeparam>
+    /// <returns>True if the test has at least one attribute of the specified type; otherwise, false.</returns>
+    public bool HasAttribute<T>() where T : Attribute
+        => AttributesByType.ContainsKey(typeof(T));
+
+    /// <summary>
+    /// Gets all attributes of the specified type.
+    /// </summary>
+    /// <typeparam name="T">The attribute type to retrieve.</typeparam>
+    /// <returns>An enumerable of attributes of the specified type.</returns>
+    public IEnumerable<T> GetAttributes<T>() where T : Attribute
+        => AttributesByType.TryGetValue(typeof(T), out var attrs)
+            ? attrs.OfType<T>()
+            : [];
+
+    /// <summary>
+    /// Gets all attributes as a flattened collection.
+    /// </summary>
+    /// <returns>All attributes associated with this test.</returns>
+    public IReadOnlyList<Attribute> GetAllAttributes() => _allAttributes;
+
     /// <summary>
     /// Resolved generic type arguments for the test method.
     /// Will be Type.EmptyTypes if the method is not generic.
     /// </summary>
     public Type[] MethodGenericArguments { get; set; } = Type.EmptyTypes;
-    
+
     /// <summary>
     /// Resolved generic type arguments for the test class.
     /// Will be Type.EmptyTypes if the class is not generic.
@@ -46,4 +134,4 @@ public class TestDetails
 /// <summary>
 /// Generic version of TestDetails for compatibility with tests
 /// </summary>
-public class TestDetails<T> : TestDetails where T : class;
+public class TestDetails<T>(IReadOnlyList<Attribute> allAttributes) : TestDetails(allAttributes) where T : class;

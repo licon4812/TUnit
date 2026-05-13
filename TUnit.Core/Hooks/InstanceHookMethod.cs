@@ -1,39 +1,42 @@
 ﻿using System.Diagnostics.CodeAnalysis;
-using System.Reflection;
-using TUnit.Core.Extensions;
-using TUnit.Core.Interfaces;
 
 namespace TUnit.Core.Hooks;
 
 #if !DEBUG
 [System.ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)]
 #endif
-public record InstanceHookMethod : IExecutableHook<TestContext>
+public record InstanceHookMethod : HookMethod, IExecutableHook<TestContext>
 {
     [DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicMethods)]
-    public required Type ClassType { get; init; }
-    public Assembly Assembly => ClassType.Assembly;
-    public required MethodMetadata MethodInfo { get; init; }
+    private readonly Type _classType = null!;
 
-    [field: AllowNull, MaybeNull]
-    public string Name => field ??= $"{ClassType.Name}.{MethodInfo.Name}({string.Join(", ", MethodInfo.Parameters.Select(x => x.Name))})";
+    [DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicMethods)]
+    public override Type ClassType => _classType;
 
-    [field: AllowNull, MaybeNull] public IEnumerable<Attribute> Attributes => field ??= MethodInfo.GetCustomAttributes();
-
-    public TAttribute? GetAttribute<TAttribute>() where TAttribute : Attribute => Attributes.OfType<TAttribute>().FirstOrDefault();
-
-    public TimeSpan? Timeout => GetAttribute<TimeoutAttribute>()?.Timeout;
-
-    public required IHookExecutor HookExecutor { get; init; }
-
-    public required int Order { get; init; }
+    public required Type InitClassType
+    {
+        [param: DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicMethods)]
+        init { _classType = value; }
+    }
 
     public Func<object, TestContext, CancellationToken, ValueTask>? Body { get; init; }
 
     public ValueTask ExecuteAsync(TestContext context, CancellationToken cancellationToken)
     {
-        return HookExecutor.ExecuteBeforeTestHook(MethodInfo, context,
-            () => Body!.Invoke(context.TestDetails.ClassInstance ?? throw new InvalidOperationException("ClassInstance is null"), context, cancellationToken)
+        // Skip instance hooks if this is a pre-skipped test
+        if (context.Metadata.TestDetails.ClassInstance is SkippedTestInstance)
+        {
+            return new ValueTask();
+        }
+
+        // If the instance is still a placeholder, we can't execute instance hooks
+        if (context.Metadata.TestDetails.ClassInstance is PlaceholderInstance)
+        {
+            throw new InvalidOperationException($"Cannot execute instance hook {Name} because the test instance has not been created yet. This is likely a framework bug.");
+        }
+
+        return ResolveEffectiveExecutor(context).ExecuteBeforeTestHook(MethodInfo, context,
+            () => Body!.Invoke(context.Metadata.TestDetails.ClassInstance, context, cancellationToken)
         );
     }
 }

@@ -33,6 +33,27 @@ internal static class Rules
     public static readonly DiagnosticDescriptor XUnitAssertion =
         CreateDescriptor("TUnitAssertions0009", UsageCategory, DiagnosticSeverity.Info);
 
+    public static readonly DiagnosticDescriptor GenerateAssertionMethodMustBeStatic =
+        CreateDescriptor("TUnitAssertions0010", UsageCategory, DiagnosticSeverity.Error);
+
+    public static readonly DiagnosticDescriptor GenerateAssertionMethodMustHaveParameter =
+        CreateDescriptor("TUnitAssertions0011", UsageCategory, DiagnosticSeverity.Error);
+
+    public static readonly DiagnosticDescriptor GenerateAssertionInvalidReturnType =
+        CreateDescriptor("TUnitAssertions0012", UsageCategory, DiagnosticSeverity.Error);
+
+    public static readonly DiagnosticDescriptor GenerateAssertionShouldBeExtensionMethod =
+        CreateDescriptor("TUnitAssertions0013", UsageCategory, DiagnosticSeverity.Warning);
+
+    public static readonly DiagnosticDescriptor PreferIsNullOverIsEqualToNull =
+        CreateDescriptor("TUnitAssertions0014", UsageCategory, DiagnosticSeverity.Warning);
+
+    public static readonly DiagnosticDescriptor PreferIsTrueOrIsFalseOverIsEqualToBool =
+        CreateDescriptor("TUnitAssertions0015", UsageCategory, DiagnosticSeverity.Warning);
+
+    public static readonly DiagnosticDescriptor CollectionIsEqualToUsesReferenceEquality =
+        CreateDescriptor("TUnitAssertions0016", UsageCategory, DiagnosticSeverity.Info);
+
     private static DiagnosticDescriptor CreateDescriptor(string diagnosticId, string category, DiagnosticSeverity severity)
     {
         return new DiagnosticDescriptor(

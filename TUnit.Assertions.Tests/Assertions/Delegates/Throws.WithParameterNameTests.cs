@@ -1,6 +1,4 @@
 ﻿using System.Diagnostics.CodeAnalysis;
-using TUnit.Assertions.AssertConditions.Throws;
-
 namespace TUnit.Assertions.Tests.Assertions.Delegates;
 
 public partial class Throws
@@ -13,24 +11,19 @@ public partial class Throws
             var paramName1 = "foo";
             var paramName2 = "bar";
             var expectedMessage = """
-                                  Expected action to throw an ArgumentException which param name equals "bar"
-                                  
-                                  but it differs at index 0:
-                                      ↓
-                                     "foo"
-                                     "bar"
-                                      ↑
-                                  
-                                  at Assert.That(action).ThrowsExactly<ArgumentException>().WithParameterName(paramName2)
-                                  """;
+                                  Expected ArgumentException to have parameter name "bar" (exact type)
+                                  but ArgumentException parameter name was "foo"
+
+                                  at Assert.That(action).ThrowsExactly<ArgumentException>().WithParameterName("bar")
+                                  """.NormalizeLineEndings();
             ArgumentException exception = new(string.Empty, paramName1);
             Action action = () => throw exception;
 
             var sut = async ()
                 => await Assert.That(action).ThrowsExactly<ArgumentException>().WithParameterName(paramName2);
 
-            await Assert.That(sut).ThrowsException()
-                .WithMessage(expectedMessage);
+            var thrownException = await Assert.That(sut).ThrowsException();
+            await Assert.That(thrownException.Message.NormalizeLineEndings()).IsEqualTo(expectedMessage);
         }
 
         [Test]

@@ -1,6 +1,6 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
-  <Import Project="..\Polyfill.props" />
+  <Import Project="..\Polyfill.targets" />
 
   <PropertyGroup>
     <TargetFrameworks>netstandard2.0</TargetFrameworks>
@@ -14,12 +14,22 @@
     <IsPackable>false</IsPackable>
   </PropertyGroup>
   <ItemGroup>
-    <PackageReference Include="Microsoft.Bcl.AsyncInterfaces" />
+    <PackageReference Include="Microsoft.Bcl.AsyncInterfaces">
+      <PrivateAssets>all</PrivateAssets>
+    </PackageReference>
     <PackageReference Include="Microsoft.CodeAnalysis.Analyzers">
       <PrivateAssets>all</PrivateAssets>
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
     </PackageReference>
     <PackageReference Include="Microsoft.CodeAnalysis.Common" />
     <PackageReference Include="Microsoft.CodeAnalysis.CSharp" />
+  </ItemGroup>
+  <ItemGroup>
+    <Compile Remove="CodeGenerators\Writers\Hooks\ClassHooksWriter.cs" />
+    <Compile Remove="Extensions\CompilationExtensions.cs" />
+    <Compile Remove="Helpers\GenericTypeInference.cs" />
+  </ItemGroup>
+  <ItemGroup>
+    <Folder Include="CodeGenerators\Writers\Hooks\" />
   </ItemGroup>
 </Project>

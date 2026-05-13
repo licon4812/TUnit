@@ -1,6 +1,4 @@
 ﻿using System.Diagnostics.CodeAnalysis;
-using TUnit.Assertions.AssertConditions.Throws;
-
 namespace TUnit.Assertions.Tests.Assertions.Delegates;
 
 public partial class Throws
@@ -13,16 +11,11 @@ public partial class Throws
             var outerMessage = "foo";
             var expectedInnerMessage = "bar";
             var expectedMessage = """
-                                  Expected action to throw an Exception which message equals "bar"
-                                  
-                                  but it differs at index 0:
-                                      ↓
-                                     "some different inner message"
-                                     "bar"
-                                      ↑
-                                  
-                                  at Assert.That(action).ThrowsException().WithInnerException().WithMessage(expectedInnerMessage)
-                                  """;
+                                  Expected exception message to equal "bar"
+                                  but exception message was "some different inner message"
+
+                                  at Assert.That(action).ThrowsException().WithInnerException().WithMessage("bar")
+                                  """.NormalizeLineEndings();
             Exception exception = CreateCustomException(outerMessage,
                 CreateCustomException("some different inner message"));
             Action action = () => throw exception;
@@ -31,8 +24,8 @@ public partial class Throws
                 => await Assert.That(action).ThrowsException()
                 .WithInnerException().WithMessage(expectedInnerMessage);
 
-            await Assert.That(sut).ThrowsException()
-                .WithMessage(expectedMessage);
+            var thrownException = await Assert.That(sut).ThrowsException();
+            await Assert.That(thrownException.Message.NormalizeLineEndings()).IsEqualTo(expectedMessage);
         }
 
         [Test]
@@ -45,7 +38,7 @@ public partial class Throws
 
             var result = await Assert.That(action).Throws<CustomException>().WithInnerException();
 
-            await Assert.That(result).IsSameReferenceAs(exception);
+            await Assert.That(result).IsSameReferenceAs(exception.InnerException);
         }
 
         [Test]

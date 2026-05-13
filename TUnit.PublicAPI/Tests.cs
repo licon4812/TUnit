@@ -9,21 +9,25 @@ public partial class Tests
 {
     [Test]
     public Task Core_Library_Has_No_API_Changes()
-    {
-        return VerifyPublicApi(typeof(TestAttribute).Assembly);
-    }
+        => VerifyPublicApi(typeof(TestAttribute).Assembly);
 
     [Test]
     public Task Assertions_Library_Has_No_API_Changes()
-    {
-        return VerifyPublicApi(typeof(Assertions.Assert).Assembly);
-    }
+        => VerifyPublicApi(typeof(Assertions.Assert).Assembly);
 
     [Test]
     public Task Playwright_Library_Has_No_API_Changes()
-    {
-        return VerifyPublicApi(typeof(Playwright.PageTest).Assembly);
-    }
+        => VerifyPublicApi(typeof(Playwright.PageTest).Assembly);
+
+#if NET
+    [Test]
+    public Task Should_Library_Has_No_API_Changes()
+        => VerifyPublicApi(typeof(Assertions.Should.ShouldExtensions).Assembly);
+
+    [Test]
+    public Task OpenTelemetry_Library_Has_No_API_Changes()
+        => VerifyPublicApi(typeof(TUnit.OpenTelemetry.TUnitOpenTelemetry).Assembly);
+#endif
 
     private async Task VerifyPublicApi(Assembly assembly)
     {
@@ -35,24 +39,33 @@ public partial class Tests
             ]
         });
 
-        await Verify(publicApi)
+        await VerifyTUnit.Verify(publicApi)
+            .AddScrubber(sb =>
+            {
+                // Scrub deterministic source paths (e.g. "/_/TUnit.OpenTelemetry/File.cs")
+                // before the URL regex mangles them into bare "/_/".
+                var replaced = System.Text.RegularExpressions.Regex.Replace(
+                    sb.ToString(),
+                    @"/_/[^""\s,)]*",
+                    "PATH_SCRUBBED");
+                sb.Clear();
+                sb.Append(replaced);
+                return sb;
+            })
             .AddScrubber(Scrub)
-            .AddScrubber(sb => new StringBuilder(sb.ToString().Replace("\\r\\n", "\\n")))
+            .AddScrubber(sb => new StringBuilder(sb.ToString().Replace("\r\n", "\n")))
             .ScrubLinesWithReplace(x => x.Replace("\r\n", "\n"))
             .ScrubLinesWithReplace(line =>
             {
-                if (line.Contains("public static class AssemblyLoader"))
-                {
-                    return "public static class AssemblyLoader_Guid";
-                }
-
-                return line;
+                return line.Contains("public static class AssemblyLoader")
+                    ? "public static class AssemblyLoader_Guid"
+                    : line;
             })
             .ScrubFilePaths()
             .OnVerifyMismatch(async (pair, message, verify) =>
             {
-                var received = await FilePolyfill.ReadAllTextAsync(pair.ReceivedPath);
-                var verified = await FilePolyfill.ReadAllTextAsync(pair.VerifiedPath);
+                var received = await File.ReadAllTextAsync(pair.ReceivedPath);
+                var verified = await File.ReadAllTextAsync(pair.VerifiedPath);
 
                 // Better diff message since original one is too large
                 await Assert.That(Scrub(received)).IsEqualTo(Scrub(verified));
@@ -68,12 +81,16 @@ public partial class Tests
             .Replace("\\r\\n", "\\n")
             .Replace("\\r", "\\n");
 
-        return new StringBuilder(newText);
+        text.Clear();
+        text.Append(newText);
+        return text;
     }
 
     private string Scrub(string text)
     {
-        return Scrub(new StringBuilder(text)).ToString();
+        var sb = new StringBuilder(text);
+        Scrub(sb);
+        return sb.ToString();
     }
 
 

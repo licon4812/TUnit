@@ -40,7 +40,10 @@ public static class Rules
         CreateDescriptor("TUnit0014", UsageCategory, DiagnosticSeverity.Warning);
 
     public static readonly DiagnosticDescriptor MissingTimeoutCancellationTokenAttributes =
-        CreateDescriptor("TUnit0015", UsageCategory, DiagnosticSeverity.Error);
+        CreateDescriptor("TUnit0015", UsageCategory, DiagnosticSeverity.Warning);
+
+    public static readonly DiagnosticDescriptor CancellationTokenMustBeLastParameter =
+        CreateDescriptor("TUnit0062", UsageCategory, DiagnosticSeverity.Warning);
 
     public static readonly DiagnosticDescriptor MethodMustNotBeStatic =
         CreateDescriptor("TUnit0016", UsageCategory, DiagnosticSeverity.Error);
@@ -72,9 +75,6 @@ public static class Rules
     public static readonly DiagnosticDescriptor AsyncVoidMethod =
         CreateDescriptor("TUnit0031", UsageCategory, DiagnosticSeverity.Error);
 
-    public static readonly DiagnosticDescriptor DependsOnNotInParallelConflict =
-        CreateDescriptor("TUnit0032", UsageCategory, DiagnosticSeverity.Error);
-
     public static readonly DiagnosticDescriptor DependsOnConflicts =
         CreateDescriptor("TUnit0033", UsageCategory, DiagnosticSeverity.Error);
 
@@ -97,7 +97,7 @@ public static class Rules
         CreateDescriptor("TUnit0042", UsageCategory, DiagnosticSeverity.Warning);
 
     public static readonly DiagnosticDescriptor PropertyRequiredNotSet =
-        CreateDescriptor("TUnit0043", UsageCategory, DiagnosticSeverity.Error);
+        CreateDescriptor("TUnit0043", UsageCategory, DiagnosticSeverity.Info);
 
     public static readonly DiagnosticDescriptor MustHavePropertySetter =
         CreateDescriptor("TUnit0044", UsageCategory, DiagnosticSeverity.Error);
@@ -129,8 +129,23 @@ public static class Rules
     public static readonly DiagnosticDescriptor XunitMigration =
         CreateDescriptor("TUXU0001", UsageCategory, DiagnosticSeverity.Info);
 
+    public static readonly DiagnosticDescriptor NUnitMigration =
+        CreateDescriptor("TUNU0001", UsageCategory, DiagnosticSeverity.Info);
+
+    public static readonly DiagnosticDescriptor MSTestMigration =
+        CreateDescriptor("TUMS0001", UsageCategory, DiagnosticSeverity.Info);
+
     public static readonly DiagnosticDescriptor OverwriteConsole =
         CreateDescriptor("TUnit0055", UsageCategory, DiagnosticSeverity.Warning);
+
+    public static readonly DiagnosticDescriptor CombinedDataSourceAttributeRequired =
+        CreateDescriptor("TUnit0070", UsageCategory, DiagnosticSeverity.Error);
+
+    public static readonly DiagnosticDescriptor CombinedDataSourceMissingParameterDataSource =
+        CreateDescriptor("TUnit0071", UsageCategory, DiagnosticSeverity.Error);
+
+    public static readonly DiagnosticDescriptor CombinedDataSourceConflictWithMatrix =
+        CreateDescriptor("TUnit0072", UsageCategory, DiagnosticSeverity.Warning);
 
     public static readonly DiagnosticDescriptor InstanceMethodSource =
         CreateDescriptor("TUnit0056", UsageCategory, DiagnosticSeverity.Error);
@@ -141,19 +156,25 @@ public static class Rules
     public static readonly DiagnosticDescriptor HookUnknownParameters =
         CreateDescriptor("TUnit0058", UsageCategory, DiagnosticSeverity.Error);
 
-    public static readonly DiagnosticDescriptor BlockingAsyncCall =
-        CreateDescriptor("TUnit0200", UsageCategory, DiagnosticSeverity.Warning);
+    public static readonly DiagnosticDescriptor AbstractTestClassWithDataSources =
+        CreateDescriptor("TUnit0059", UsageCategory, DiagnosticSeverity.Warning);
 
-    public static readonly DiagnosticDescriptor GenericTypeNotAotCompatible =
-        CreateDescriptor("TUnit0300", UsageCategory, DiagnosticSeverity.Warning);
+    public static readonly DiagnosticDescriptor PotentialEmptyDataSource =
+        CreateDescriptor("TUnit0060", UsageCategory, DiagnosticSeverity.Info);
 
-    public static readonly DiagnosticDescriptor TupleNotAotCompatible =
-        CreateDescriptor("TUnit0301", UsageCategory, DiagnosticSeverity.Warning);
+    public static readonly DiagnosticDescriptor NoAccessibleConstructor =
+        CreateDescriptor("TUnit0061", UsageCategory, DiagnosticSeverity.Error);
 
-    public static readonly DiagnosticDescriptor CustomConversionNotAotCompatible =
-        CreateDescriptor("TUnit0302", UsageCategory, DiagnosticSeverity.Warning);
+    public static readonly DiagnosticDescriptor MissingPolyfillPackage =
+        CreateDescriptor("TUnit0073", UsageCategory, DiagnosticSeverity.Error,
+            customTags: [WellKnownDiagnosticTags.CompilationEnd],
+            helpLinkUri: "https://www.nuget.org/packages/Polyfill");
 
-    private static DiagnosticDescriptor CreateDescriptor(string diagnosticId, string category, DiagnosticSeverity severity)
+    public static readonly DiagnosticDescriptor RedundantHookAttributeOnOverride =
+        CreateDescriptor("TUnit0074", UsageCategory, DiagnosticSeverity.Error);
+
+    private static DiagnosticDescriptor CreateDescriptor(string diagnosticId, string category, DiagnosticSeverity severity,
+        string[]? customTags = null, string? helpLinkUri = null)
     {
         return new DiagnosticDescriptor(
             id: diagnosticId,
@@ -165,7 +186,9 @@ public static class Rules
             defaultSeverity: severity,
             isEnabledByDefault: true,
             description: new LocalizableResourceString(diagnosticId + "Description", Resources.ResourceManager,
-                typeof(Resources))
+                typeof(Resources)),
+            helpLinkUri: helpLinkUri,
+            customTags: customTags ?? []
         );
     }
 }

@@ -8,27 +8,10 @@ namespace TUnit.Core;
 /// </summary>
 public class DiscoveredTestContext
 {
-    private readonly List<string> _categories =
-    [
-    ];
-    private readonly List<Func<object?, string?>> _argumentDisplayFormatters =
-    [
-    ];
-
-    // Typed fields for known configuration
-    private Type? _displayNameFormatter;
-    private Func<TestContext, Exception, int, Task<bool>>? _shouldRetryFunc;
-    private IParallelConstraint? _parallelConstraint;
-    private Priority _priority = Priority.Normal;
-
     public string TestName { get; }
-    public TestContext TestContext
-    {
-        get;
-    }
+    public TestContext TestContext { get; }
 
-    public TestDetails TestDetails => TestContext.TestDetails;
-    public bool RunOnTestDiscovery { get; private set; }
+    public TestDetails TestDetails => TestContext.Metadata.TestDetails;
 
     public DiscoveredTestContext(string testName, TestContext testContext)
     {
@@ -38,13 +21,9 @@ public class DiscoveredTestContext
 
     public void AddCategory(string category)
     {
-        if (!string.IsNullOrWhiteSpace(category) && !_categories.Contains(category))
+        if (!string.IsNullOrWhiteSpace(category) && !TestContext.Metadata.TestDetails.Categories.Contains(category))
         {
-            _categories.Add(category);
-            if (!TestDetails.Categories.Contains(category))
-            {
-                TestDetails.Categories.Add(category);
-            }
+            TestDetails.Categories.Add(category);
         }
     }
 
@@ -52,8 +31,7 @@ public class DiscoveredTestContext
     {
         if (!TestDetails.CustomProperties.TryGetValue(key, out var values))
         {
-            values =
-            [];
+            values = [];
             TestDetails.CustomProperties[key] = values;
         }
 
@@ -63,7 +41,7 @@ public class DiscoveredTestContext
 
     public void SetDisplayNameFormatter(Type formatterType)
     {
-        _displayNameFormatter = formatterType;
+        TestContext.DisplayNameFormatter = formatterType;
     }
 
     public void SetDisplayName(string displayName)
@@ -73,57 +51,50 @@ public class DiscoveredTestContext
 
     public void SetRetryLimit(int retryLimit)
     {
-        TestDetails.RetryLimit = retryLimit;
+        SetRetryLimit(retryLimit, (_, _, _) => Task.FromResult(true));
     }
 
-    public void SetRetryCount(int retryCount, Func<TestContext, Exception, int, Task<bool>> shouldRetry)
+    public void SetRetryLimit(int retryCount, Func<TestContext, Exception, int, Task<bool>> shouldRetry)
     {
-        SetRetryLimit(retryCount);
-        _shouldRetryFunc = shouldRetry;
+        TestContext.RetryFunc = shouldRetry;
+        TestContext.Metadata.TestDetails.RetryLimit = retryCount;
     }
 
-    public void SetParallelConstraint(object constraint)
+    /// <summary>
+    /// Sets the backoff configuration for retry attempts.
+    /// </summary>
+    /// <param name="backoffMs">Initial delay in milliseconds before the first retry. 0 means no delay.</param>
+    /// <param name="backoffMultiplier">Multiplier for exponential backoff (e.g. 2.0 doubles the delay each retry).</param>
+    public void SetRetryBackoff(int backoffMs, double backoffMultiplier)
     {
-        _parallelConstraint = constraint as IParallelConstraint;
+        TestContext.Metadata.TestDetails.RetryBackoffMs = backoffMs;
+        TestContext.Metadata.TestDetails.RetryBackoffMultiplier = backoffMultiplier;
+    }
+
+    /// <summary>
+    /// Adds a parallel constraint to the test context.
+    /// Multiple constraints can be combined (e.g., ParallelGroup + NotInParallel).
+    /// </summary>
+    public void AddParallelConstraint(IParallelConstraint constraint)
+    {
+        TestContext.Parallelism.AddConstraint(constraint);
     }
 
     public void AddArgumentDisplayFormatter(ArgumentDisplayFormatter formatter)
     {
-        _argumentDisplayFormatters.Add(obj => formatter.CanHandle(obj) ? formatter.FormatValue(obj) : null);
-    }
-
-    public void SetRunOnDiscovery(bool runOnDiscovery)
-    {
-        RunOnTestDiscovery = runOnDiscovery;
+        TestContext.ArgumentDisplayFormatters.Add(obj => formatter.CanHandle(obj) ? formatter.FormatValue(obj) : null);
     }
 
     public void SetPriority(Priority priority)
     {
-        _priority = priority;
+        TestContext.ExecutionPriority = priority;
     }
 
 
     /// <summary>
     /// Gets the argument display formatters
     /// </summary>
-    public List<Func<object?, string?>> ArgumentDisplayFormatters => _argumentDisplayFormatters;
-
-    /// <summary>
-    /// Transfers configuration to a TestContext
-    /// </summary>
-    public void TransferTo(TestContext testContext)
-    {
-        testContext.DisplayNameFormatter = _displayNameFormatter;
-        testContext.RetryFunc = _shouldRetryFunc;
-        testContext.ParallelConstraint = _parallelConstraint;
-        testContext.ExecutionPriority = _priority;
-        testContext.RunOnTestDiscovery = RunOnTestDiscovery;
-
-        foreach (var formatter in _argumentDisplayFormatters)
-        {
-            testContext.ArgumentDisplayFormatters.Add(formatter);
-        }
-    }
+    public List<Func<object?, string?>> ArgumentDisplayFormatters => TestContext.ArgumentDisplayFormatters;
 
     /// <summary>
     /// Gets the test display name

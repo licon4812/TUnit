@@ -4,8 +4,9 @@ using Microsoft.CodeAnalysis.CodeFixes;
 using Microsoft.CodeAnalysis.CSharp.Testing;
 using Microsoft.CodeAnalysis.Diagnostics;
 using Microsoft.CodeAnalysis.Testing;
+using TUnit.Assertions;
 using TUnit.Assertions.Analyzers.CodeFixers.Tests.Extensions;
-using TUnit.Assertions.AssertionBuilders;
+using TUnit.Core;
 
 namespace TUnit.Assertions.Analyzers.CodeFixers.Tests.Verifiers;
 
@@ -13,6 +14,18 @@ public static partial class CSharpCodeFixVerifier<TAnalyzer, TCodeFix>
     where TAnalyzer : DiagnosticAnalyzer, new()
     where TCodeFix : CodeFixProvider, new()
 {
+    private static ReferenceAssemblies GetReferenceAssemblies()
+    {
+#if NET472
+        return ReferenceAssemblies.NetFramework.Net472.Default;
+#elif NET8_0
+        return ReferenceAssemblies.Net.Net80;
+#elif NET9_0 || NET10_0_OR_GREATER
+        return ReferenceAssemblies.Net.Net90;
+#else
+        return ReferenceAssemblies.Net.Net80; // Default fallback
+#endif
+    }
     /// <inheritdoc cref="Microsoft.CodeAnalysis.Diagnostic"/>
     public static DiagnosticResult Diagnostic()
         => CSharpCodeFixVerifier<TAnalyzer, TCodeFix, DefaultVerifier>.Diagnostic();
@@ -30,18 +43,25 @@ public static partial class CSharpCodeFixVerifier<TAnalyzer, TCodeFix>
         params DiagnosticResult[] expected
     )
     {
+        var referenceAssemblies = GetReferenceAssemblies();
+
+        // Only add xunit package for XUnitAssertionAnalyzer
+        if (typeof(TAnalyzer).Name == "XUnitAssertionAnalyzer")
+        {
+            referenceAssemblies = referenceAssemblies.AddPackages([new PackageIdentity("xunit.v3.assert", "3.2.0")]);
+        }
+
         var test = new Test
         {
             TestCode = source.NormalizeLineEndings(),
             CodeActionValidationMode = CodeActionValidationMode.SemanticStructure,
-            ReferenceAssemblies = ReferenceAssemblies.Net.Net90
-                .AddPackages([new PackageIdentity("xunit.v3.assert", "2.0.0")]),
+            ReferenceAssemblies = referenceAssemblies,
             TestState =
             {
                 AdditionalReferences =
                 {
-                    typeof(TUnitAttribute).Assembly.Location,
-                    typeof(AssertionBuilder).Assembly.Location,
+                    TUnit.Tests.Shared.AnalyzerTestCompatibility.GetCompatibleDllPath("TUnit.Core", typeof(TUnitAttribute).Assembly),
+                    TUnit.Tests.Shared.AnalyzerTestCompatibility.GetCompatibleDllPath("TUnit.Assertions", typeof(Assert).Assembly),
                 },
             },
         };
@@ -65,18 +85,25 @@ public static partial class CSharpCodeFixVerifier<TAnalyzer, TCodeFix>
         [StringSyntax("c#-test")] string fixedSource
     )
     {
+        var referenceAssemblies = GetReferenceAssemblies();
+
+        // Only add xunit package for XUnitAssertionAnalyzer
+        if (typeof(TAnalyzer).Name == "XUnitAssertionAnalyzer")
+        {
+            referenceAssemblies = referenceAssemblies.AddPackages([new PackageIdentity("xunit.v3.assert", "3.2.0")]);
+        }
+
         var test = new Test
         {
             TestCode = source.NormalizeLineEndings(),
             FixedCode = fixedSource.NormalizeLineEndings(),
-            ReferenceAssemblies = ReferenceAssemblies.Net.Net90
-                .AddPackages([new PackageIdentity("xunit.v3.assert", "2.0.0")]),
+            ReferenceAssemblies = referenceAssemblies,
             TestState =
             {
                 AdditionalReferences =
                 {
-                    typeof(TUnitAttribute).Assembly.Location,
-                    typeof(AssertionBuilder).Assembly.Location,
+                    TUnit.Tests.Shared.AnalyzerTestCompatibility.GetCompatibleDllPath("TUnit.Core", typeof(TUnitAttribute).Assembly),
+                    TUnit.Tests.Shared.AnalyzerTestCompatibility.GetCompatibleDllPath("TUnit.Assertions", typeof(Assert).Assembly),
                 },
             },
             CodeActionValidationMode = CodeActionValidationMode.SemanticStructure,

@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
-    
+
     <PropertyGroup>
-        <TargetFrameworks>net8.0</TargetFrameworks>
+        <TargetFrameworks>net10.0</TargetFrameworks>
         <ImplicitUsings>enable</ImplicitUsings>
         <Nullable>enable</Nullable>
 
@@ -13,6 +13,7 @@
     <ItemGroup>
         <PackageReference Include="CliWrap" />
         <PackageReference Include="MessagePack" />
+        <PackageReference Include="Microsoft.Testing.Extensions.HangDump" />
         <PackageReference Include="Microsoft.Testing.Platform" />
         <PackageReference Include="Sourcy.DotNet">
           <PrivateAssets>all</PrivateAssets>

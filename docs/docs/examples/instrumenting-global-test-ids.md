@@ -4,7 +4,7 @@ There are plenty use cases for having a unique identifier for each test in your 
 
 A straightforward way to ensure data isolation is to connect to a different data source for each test. To isolate, you need a unique identifier to differentiate between the tests. This identifier should be known before the test starts, so you can use it to provision the data source and build the connection string. For Redis, you would typically use a different database number for each test. For SQL databases, you would typically use a different table or database name for each test.
 
-We can hook into TUnit's test discovery process and assign unique identifiers to tests by implementing `OnTestDiscovery(DiscoveredTestContext discoveredTestContext)` in `ITestDiscoveryEventReceiver`. Here's an example implementation that is tailored for contrived test cases involving Redis databases:
+We can hook into TUnit's test discovery process and assign unique identifiers to tests by implementing `OnTestDiscovered(DiscoveredTestContext discoveredTestContext)` in `ITestDiscoveryEventReceiver`. Here's an example implementation that is tailored for contrived test cases involving Redis databases:
 
 ```csharp
 class AssignTestIdentifiersAttribute : Attribute, ITestDiscoveryEventReceiver
@@ -13,18 +13,19 @@ class AssignTestIdentifiersAttribute : Attribute, ITestDiscoveryEventReceiver
 
     public static int TestId { get; private set; } = 0;
 
-    public void OnTestDiscovery(DiscoveredTestContext discoveredTestContext)
+    public ValueTask OnTestDiscovered(DiscoveredTestContext discoveredTestContext)
     {
-        discoveredTestContext.TestContext.ObjectBag[TestIdObjectBagKey] = TestId++;
+        discoveredTestContext.TestContext.StateBag[TestIdObjectBagKey] = TestId++;
+        return ValueTask.CompletedTask;
     }
 }
 ```
 
-`TestIdObjectBagKey` is a unique key that we use to store the test identifier in the `ObjectBag` of TUnit's `TestContext`.
+`TestIdObjectBagKey` is a unique key that we use to store the test identifier in the `StateBag` of TUnit's `TestContext`.
 
 `TestId` is a static integer that we increment for each test. We use this to assign a unique identifier to each test.
 
-In `OnTestDiscovery`, we assign the test identifier to the `ObjectBag` using the `TestIdObjectBagKey`. The use of `ObjectBag` exposes the test identifier to hooks and tests.
+In `OnTestDiscovered`, we assign the test identifier to the `StateBag` using the `TestIdObjectBagKey`. The use of `StateBag` exposes the test identifier to hooks and tests.
 
 Before we demonstrate how to use this attribute, let's create a simple extension method for `TestContext` to retrieve the test identifier swiftly:
 
@@ -33,8 +34,8 @@ static class TestContextExtensions
 {
     public static int GetTestId(this TestContext? testContext)
     {
-        // Retrieve the test identifier from the ObjectBag
-        return (int)testContext!.ObjectBag[AssignTestIdentifiersAttribute.TestIdObjectBagKey]!;
+        // Retrieve the test identifier from the StateBag
+        return (int)testContext!.StateBag[AssignTestIdentifiersAttribute.TestIdObjectBagKey]!;
     }
 }
 ```
@@ -52,7 +53,7 @@ class MyTestClassThatNeedsUniqueTestIds
 {
     private IDatabase isolatedRedisDb = null!;
 
-    [Before(HookType.Test)]
+    [Before(Test)]
     public void BeforeEach()
     {
         // Call the extension method to retrieve the unique test id:

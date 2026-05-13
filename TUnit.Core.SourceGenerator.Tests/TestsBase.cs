@@ -16,9 +16,9 @@ public class TestsBase
     }
 
     public TestsBase<TestMetadataGenerator> TestMetadataGenerator = new();
+    public TestsBase<AotConverterGenerator> AotConverterGenerator = new();
     public TestsBase<HookMetadataGenerator> HooksGenerator = new();
-    public TestsBase<AssemblyLoaderGenerator> AssemblyLoaderGenerator = new();
-    public TestsBase<DisableReflectionScannerGenerator> DisableReflectionScannerGenerator = new();
+    public TestsBase<InfrastructureGenerator> InfrastructureGenerator = new();
     public TestsBase<DynamicTestsGenerator> DynamicTestsGenerator = new();
 
     public Task RunTest(string inputFile, Func<string[], Task> assertions)
@@ -42,7 +42,7 @@ public class TestsBase<TGenerator> where TGenerator : IIncrementalGenerator, new
     public async Task RunTest(string inputFile, RunTestOptions runTestOptions, Func<string[], Task> assertions)
     {
 #if NET
-        var source = await FilePolyfill.ReadAllTextAsync(inputFile);
+        var source = await File.ReadAllTextAsync(inputFile);
 #else
         var source = File.ReadAllText(inputFile);
 #endif
@@ -85,7 +85,7 @@ public class TestsBase<TGenerator> where TGenerator : IIncrementalGenerator, new
             public class UnconditionalSuppressMessageAttribute : Attribute;
             """,
 #if NET
-            ..await Task.WhenAll(runTestOptions.AdditionalFiles.Select(x => FilePolyfill.ReadAllTextAsync(x))),
+            ..await Task.WhenAll(runTestOptions.AdditionalFiles.Select(x => File.ReadAllTextAsync(x))),
 #else
             ..runTestOptions.AdditionalFiles.Select(x => File.ReadAllText(x)),
 #endif
@@ -171,8 +171,8 @@ public class TestsBase<TGenerator> where TGenerator : IIncrementalGenerator, new
         {
             verifyTask = verifyTask.OnVerifyMismatch(async (pair, message, verify) =>
             {
-                var received = await FilePolyfill.ReadAllTextAsync(pair.ReceivedPath);
-                var verified = await FilePolyfill.ReadAllTextAsync(pair.VerifiedPath);
+                var received = await File.ReadAllTextAsync(pair.ReceivedPath);
+                var verified = await File.ReadAllTextAsync(pair.VerifiedPath);
 
                 // Better diff message since original one is too large
                 await Assert.That(Scrub(received)).IsEqualTo(Scrub(verified));
@@ -206,13 +206,21 @@ public class TestsBase<TGenerator> where TGenerator : IIncrementalGenerator, new
             .Replace("\\r", "\\n");
 
         // Scrub GUIDs from class names and identifiers
-        // Pattern 1: ClassName_[32 hex chars]
-        var guidPattern1 = @"([A-Za-z_]\w*)_[a-fA-F0-9]{32}";
-        var scrubbedText = System.Text.RegularExpressions.Regex.Replace(result.ToString(), guidPattern1, "$1_GUID", System.Text.RegularExpressions.RegexOptions.None);
+        // Pattern 1: TestSource classes - ClassName_MethodName_TestSource_[32 hex chars]
+        var guidPattern1 = @"_TestSource_[a-fA-F0-9]{32}";
+        var scrubbedText = System.Text.RegularExpressions.Regex.Replace(result.ToString(), guidPattern1, "_TestSource_GUID", System.Text.RegularExpressions.RegexOptions.None);
 
-        // Pattern 2: ClassName_[standard GUID format]
-        var guidPattern2 = @"([A-Za-z_]\w*)_[a-fA-F0-9]{8}-?[a-fA-F0-9]{4}-?[a-fA-F0-9]{4}-?[a-fA-F0-9]{4}-?[a-fA-F0-9]{12}";
-        scrubbedText = System.Text.RegularExpressions.Regex.Replace(scrubbedText, guidPattern2, "$1_GUID", System.Text.RegularExpressions.RegexOptions.None);
+        // Pattern 2: ModuleInitializer classes - ClassName_MethodName_ModuleInitializer_[32 hex chars]
+        var guidPattern2 = @"_ModuleInitializer_[a-fA-F0-9]{32}";
+        scrubbedText = System.Text.RegularExpressions.Regex.Replace(scrubbedText, guidPattern2, "_ModuleInitializer_GUID", System.Text.RegularExpressions.RegexOptions.None);
+
+        var guidPattern3 = @"_(Before|After|BeforeEvery|AfterEvery)_(Test|Class|Assembly|TestSession|TestDiscovery)_[a-fA-F0-9]{32}";
+        scrubbedText = System.Text.RegularExpressions.Regex.Replace(scrubbedText, guidPattern3, "_$1_$2_GUID", System.Text.RegularExpressions.RegexOptions.None);
+
+        // Scrub version numbers in GeneratedCode attributes (e.g., "1.18.40.0" → "VERSION_SCRUBBED")
+        var versionPattern = @"\[global::System\.CodeDom\.Compiler\.GeneratedCode\(""TUnit"", ""[^""]*""\)\]";
+        scrubbedText = System.Text.RegularExpressions.Regex.Replace(scrubbedText, versionPattern,
+            @"[global::System.CodeDom.Compiler.GeneratedCode(""TUnit"", ""VERSION_SCRUBBED"")]", System.Text.RegularExpressions.RegexOptions.None);
 
         // Scrub file paths - Windows style (e.g., D:\\git\\TUnit\\)
         var windowsPathPattern = @"[A-Za-z]:\\\\[^""'\s,)]+";

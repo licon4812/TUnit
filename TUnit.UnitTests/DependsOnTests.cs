@@ -2,46 +2,45 @@ namespace TUnit.UnitTests;
 
 public class DependsOnTests
 {
-    private static TestMetadata<T> CreateTestMetadata<T>(string testId, string methodName, int parameterCount = 0, Type[]? parameterTypes = null, string[]? parameterTypeNames = null) where T : class
+    private static TestMetadata<T> CreateTestMetadata<T>(string testId, string methodName, int parameterCount = 0, Type[]? parameterTypes = null) where T : class
     {
         if (parameterTypes == null && parameterCount > 0)
         {
             parameterTypes = parameterCount == 1 ? [typeof(string)] : [typeof(string), typeof(int)];
-            parameterTypeNames = parameterCount == 1 ? ["System.String"] : ["System.String", "System.Int32"];
         }
+
+        var parameters = parameterTypes?.Select((type, index) =>
+            new ParameterMetadata(type)
+            {
+                Name = $"param{index}",
+                TypeInfo = new ConcreteType(type),
+                ReflectionInfo = null!,
+                IsNullable = false
+            }).ToArray() ?? [];
 
         return new TestMetadata<T>
         {
             TestClassType = typeof(T),
             TestMethodName = methodName,
             TestName = methodName,
-            ParameterCount = parameterCount,
-            ParameterTypes = parameterTypes
-                ??
-                [
-                ],
-            TestMethodParameterTypes = parameterTypeNames
-                ??
-                [
-                ],
+            FilePath = "Unknown",
+            LineNumber = 0,
             AttributeFactory = () =>
             [
             ],
             MethodMetadata = new MethodMetadata
             {
                 Type = typeof(T),
-                TypeReference = TypeReference.CreateConcrete(typeof(T).AssemblyQualifiedName ?? typeof(T).FullName ?? typeof(T).Name),
+                TypeInfo = new ConcreteType(typeof(T)),
                 Name = methodName,
                 GenericTypeCount = 0,
                 ReturnType = typeof(void),
-                ReturnTypeReference = TypeReference.CreateConcrete(typeof(void).AssemblyQualifiedName ?? "System.Void"),
-                Parameters =
-                [
-                ],
+                ReturnTypeInfo = new ConcreteType(typeof(void)),
+                Parameters = parameters,
                 Class = new ClassMetadata
                 {
                     Type = typeof(T),
-                    TypeReference = TypeReference.CreateConcrete(typeof(T).AssemblyQualifiedName ?? typeof(T).FullName ?? typeof(T).Name),
+                    TypeInfo = new ConcreteType(typeof(T)),
                     Name = typeof(T).Name,
                     Namespace = typeof(T).Namespace ?? string.Empty,
                     Assembly = new AssemblyMetadata
@@ -205,6 +204,31 @@ public class DependsOnTests
     }
 
     [Test]
+    public async Task TestDependency_WithOpenGenericBase_MatchesInheritedTests()
+    {
+        // Test with open generic type (like in the problem statement)
+        var dependency = TestDependency.FromClass(typeof(GenericBaseClass<>));
+        var testMetadata = CreateTestMetadata<DerivedFromGenericClass>("test1", "Test");
+        
+        var matches = dependency.Matches(testMetadata);
+        
+        await Assert.That(matches).IsTrue();
+    }
+
+    [Test]
+    public async Task TestDependency_ComplexGenericInheritance_MatchesCorrectly()
+    {
+        // Test complex inheritance like in the problem statement
+        // Testing if SecondClassBase<,> dependency matches ComplexGenericDependsOn tests
+        var dependency = TestDependency.FromClass(typeof(SecondClassBase<,>));
+        var testMetadata = CreateTestMetadata<ComplexGenericDependsOn>("test1", "Test300");
+        
+        var matches = dependency.Matches(testMetadata);
+        
+        await Assert.That(matches).IsTrue();
+    }
+
+    [Test]
     public async Task TestDependency_FromClassAndMethod_MatchesInheritedMethod()
     {
         var dependency = TestDependency.FromClassAndMethod(typeof(BaseTestClass), "BaseMethod");
@@ -238,5 +262,36 @@ public class DependsOnTests
     {
         [Test]
         public void Test() { }
+    }
+
+    // Add classes to reproduce the problem statement
+    public abstract class FirstClassBase
+    {
+        public Task Test001() => Task.Delay(50);
+        public Task Test002() => Task.Delay(50);
+        public Task Test003() => Task.Delay(50);
+    }
+
+    public abstract class SecondClassBase<TContent, TValue> : FirstClassBase
+        where TContent : class
+    {
+        public Task Test100() => Task.Delay(50);
+        public Task Test101() => Task.Delay(50);
+        public Task Test102() => Task.Delay(50);
+    }
+
+    public abstract class ThirdClassBase<TContent, TValue> : SecondClassBase<TContent, TValue>
+        where TContent : class
+    {
+        public Task Test200() => Task.Delay(50);
+        public Task Test201() => Task.Delay(50);
+        public Task Test202() => Task.Delay(50);
+    }
+
+    public class ComplexGenericDependsOn : ThirdClassBase<string, int>
+    {
+        public Task Test300() => Task.Delay(50);
+        public Task Test301() => Task.Delay(50);
+        public Task Test302() => Task.Delay(50);
     }
 }

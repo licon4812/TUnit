@@ -3,17 +3,21 @@ using Microsoft.Testing.Platform.CommandLine;
 using Microsoft.Testing.Platform.Extensions.TestFramework;
 using TUnit.Core;
 using TUnit.Engine.CommandLineProviders;
+using TUnit.Engine.Discovery;
 using TUnit.Engine.Exceptions;
 
 namespace TUnit.Engine;
 
-internal class TUnitInitializer(ICommandLineOptions commandLineOptions)
+internal class TUnitInitializer(ICommandLineOptions commandLineOptions, IHookRegistrar hookDiscoveryService)
 {
     public void Initialize(ExecuteRequestContext context)
     {
         ConfigureGlobalExceptionHandlers(context);
         SetUpExceptionListeners();
         ParseParameters();
+
+        // Discover hooks using the mode-specific service
+        hookDiscoveryService.DiscoverHooks();
 
         if (!string.IsNullOrEmpty(TestContext.OutputDirectory))
         {
@@ -36,7 +40,11 @@ internal class TUnitInitializer(ICommandLineOptions commandLineOptions)
         foreach (var parameter in parameters)
         {
             var split = parameter.Split('=');
-            TestContext.InternalParametersDictionary.Add(split[0], split[1]);
+            var key = split[0];
+            var value = split[1];
+
+            var list = TestContext.InternalParametersDictionary.GetOrAdd(key, static _ => []);
+            list.Add(value);
         }
     }
 

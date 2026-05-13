@@ -8,11 +8,13 @@
         <TestingPlatformShowTestsFailure>true</TestingPlatformShowTestsFailure>
         <TestingPlatformCaptureOutput>false</TestingPlatformCaptureOutput>
         <OutputType>Exe</OutputType>
+        <UseTestingPlatformProtocol>true</UseTestingPlatformProtocol>
+        <IsTestingPlatformEnabled>true</IsTestingPlatformEnabled>
     </PropertyGroup>
 
     <PropertyGroup>
-        <TUnitImplicitUsings>true</TUnitImplicitUsings>
-        <TUnitAssertionsImplicitUsings>true</TUnitAssertionsImplicitUsings>
+        <TUnitImplicitUsings Condition="'$(TUnitImplicitUsings)' == ''">true</TUnitImplicitUsings>
+        <TUnitAssertionsImplicitUsings Condition="'$(TUnitAssertionsImplicitUsings)' == ''">true</TUnitAssertionsImplicitUsings>
     </PropertyGroup>
 
     <ItemGroup>

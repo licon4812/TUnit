@@ -6,26 +6,27 @@ using ModularPipelines.Extensions;
 using ModularPipelines.Git.Extensions;
 using ModularPipelines.Models;
 using ModularPipelines.Modules;
+using ModularPipelines.Options;
 
 namespace TUnit.Pipeline.Modules;
 
-[NotInParallel("DotNetTests")]
-[DependsOn<PublishSingleFileModule>]
-[DependsOn<PublishAOTModule>]
+[NotInParallel("NetworkTests")]
 [DependsOn<RunAnalyzersTestsModule>]
 [DependsOn<RunUnitTestsModule>]
 [DependsOn<RunTemplateTestsModule>]
-[DependsOn<RunAspNetTestsModule>]
+[DependsOn<RunAspNetTestsModule>(Optional = true)]
 [DependsOn<RunAssertionsTestsModule>]
-[DependsOn<RunPlaywrightTestsModule>]
-[DependsOn<RunRpcTestsModule>]
+[DependsOn<RunAssertionsShouldTestsModule>]
+[DependsOn<RunAssertionsShouldSourceGeneratorTestsModule>]
+[DependsOn<RunPlaywrightTestsModule>(Optional = true)]
+[DependsOn<RunRpcTestsModule>(Optional = true)]
 [DependsOn<RunAssertionsAnalyzersTestsModule>]
 [DependsOn<RunPublicAPITestsModule>]
 [DependsOn<RunSourceGeneratorTestsModule>]
 [DependsOn<RunAssertionsCodeFixersTestsModule>]
 public class RunEngineTestsModule : Module<CommandResult>
 {
-    protected override async Task<CommandResult?> ExecuteAsync(IPipelineContext context, CancellationToken cancellationToken)
+    protected override async Task<CommandResult?> ExecuteAsync(IModuleContext context, CancellationToken cancellationToken)
     {
         var project = context.Git().RootDirectory.FindFile(x => x.Name == "TUnit.Engine.Tests.csproj").AssertExists();
 
@@ -33,17 +34,25 @@ public class RunEngineTestsModule : Module<CommandResult>
         {
             Project = project.Name,
             NoBuild = true,
-            Configuration = Configuration.Release,
-            Framework = "net9.0",
-            WorkingDirectory = project.Folder!,
+            Configuration = "Release",
+            Framework = "net10.0",
             Arguments = [
-                "--hangdump", "--hangdump-filename", "hangdump.engine-tests.txt", "--hangdump-timeout", "20m",
-                "--maximum-parallel-tests", $"{Environment.ProcessorCount}",
-                "--fail-fast"
+                "--hangdump", "--hangdump-filename", $"hangdump.{Environment.OSVersion.Platform}.engine-tests.dmp", "--hangdump-timeout", "30m",
+                "--timeout", "35m",
             ],
+        }, new CommandExecutionOptions
+        {
+            WorkingDirectory = project.Folder!.Path,
             EnvironmentVariables = new Dictionary<string, string?>
             {
-                ["DISABLE_GITHUB_REPORTER"] = "true",
+                ["TUNIT_DISABLE_GITHUB_REPORTER"] = "true",
+            },
+            LogSettings = new CommandLoggingOptions
+            {
+                ShowCommandArguments = true,
+                ShowStandardError = true,
+                ShowExecutionTime = true,
+                ShowExitCode = true
             }
         }, cancellationToken);
     }

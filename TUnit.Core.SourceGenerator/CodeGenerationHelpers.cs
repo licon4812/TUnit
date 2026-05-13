@@ -1,8 +1,8 @@
+using System.Collections.Immutable;
 using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.CSharp.Syntax;
 using TUnit.Core.SourceGenerator.CodeGenerators.Helpers;
-using TUnit.Core.SourceGenerator.CodeGenerators.Writers;
 using TUnit.Core.SourceGenerator.Extensions;
-using TUnit.Core.SourceGenerator.Utilities;
 
 namespace TUnit.Core.SourceGenerator;
 
@@ -12,86 +12,194 @@ namespace TUnit.Core.SourceGenerator;
 internal static class CodeGenerationHelpers
 {
     /// <summary>
-    /// Generates C# code for a ParameterMetadata array from method parameters.
-    /// </summary>
-    public static string GenerateParameterMetadataArray(IMethodSymbol method)
-    {
-        if (method.Parameters.Length == 0)
-        {
-            return "System.Array.Empty<global::TUnit.Core.ParameterMetadata>()";
-        }
-
-        using var writer = new CodeWriter("", includeHeader: false);
-        writer.SetIndentLevel(2);
-        using (writer.BeginArrayInitializer("new global::TUnit.Core.ParameterMetadata[]"))
-        {
-            foreach (var param in method.Parameters)
-            {
-                var parameterIndex = method.Parameters.IndexOf(param);
-                var containsTypeParam = ContainsTypeParameter(param.Type);
-                var typeForConstructor = containsTypeParam ? "object" : param.Type.GloballyQualified();
-
-                using (writer.BeginObjectInitializer($"new global::TUnit.Core.ParameterMetadata(typeof({typeForConstructor}))", ","))
-                {
-                    writer.AppendLine($"Name = \"{param.Name}\",");
-                    writer.AppendLine($"TypeReference = {GenerateTypeReference(param.Type)},");
-                    writer.AppendLine($"IsNullable = {param.Type.IsNullable().ToString().ToLowerInvariant()},");
-                    var paramTypesArray = GenerateParameterTypesArray(method);
-                    if (paramTypesArray == "null")
-                    {
-                        writer.AppendLine($"ReflectionInfo = typeof({method.ContainingType.GloballyQualified()}).GetMethods(BindingFlags.Public | BindingFlags.Instance).FirstOrDefault(m => m.Name == \"{method.Name}\" && m.GetParameters().Length == {method.Parameters.Length})?.GetParameters()[{parameterIndex}]");
-                    }
-                    else
-                    {
-                        writer.AppendLine($"ReflectionInfo = typeof({method.ContainingType.GloballyQualified()}).GetMethod(\"{method.Name}\", BindingFlags.Public | BindingFlags.Instance, null, {paramTypesArray}, null)!.GetParameters()[{parameterIndex}]");
-                    }
-                }
-            }
-        }
-        return writer.ToString().TrimEnd(); // Trim trailing newline for inline use
-    }
-
-    /// <summary>
     /// Generates direct instantiation code for attributes.
     /// </summary>
-    public static string GenerateAttributeInstantiation(AttributeData attr)
+    public static string GenerateAttributeInstantiation(AttributeData attr, ImmutableArray<IParameterSymbol> targetParameters = default)
     {
         var typeName = attr.AttributeClass!.GloballyQualified();
         using var writer = new CodeWriter("", includeHeader: false);
         writer.SetIndentLevel(1);
         writer.Append($"new {typeName}(");
 
+        // Try to get the original syntax for better precision with decimal literals
+        var syntax = attr.ApplicationSyntaxReference?.GetSyntax();
+        var syntaxArguments = syntax?.ChildNodes()
+            .OfType<AttributeArgumentListSyntax>()
+            .FirstOrDefault()
+            ?.Arguments.Where(x => x.NameEquals == null).ToList();
+
         if (attr.ConstructorArguments.Length > 0)
         {
             var argStrings = new List<string>();
 
+            // Determine if this is an Arguments attribute and get parameter types
+            ITypeSymbol[]? parameterTypes = null;
+            if (attr.AttributeClass?.Name == "ArgumentsAttribute" && !targetParameters.IsDefault)
+            {
+                parameterTypes = targetParameters.Select(p => p.Type).ToArray();
+            }
+
+            var syntaxIndex = 0;
             for (var i = 0; i < attr.ConstructorArguments.Length; i++)
             {
                 var arg = attr.ConstructorArguments[i];
 
                 // Check if this is a params array parameter
-                if (i == attr.ConstructorArguments.Length - 1 && IsParamsArrayArgument(attr, i))
+                if (i == attr.ConstructorArguments.Length - 1 && IsParamsArrayArgument(attr))
                 {
                     if (arg.Kind == TypedConstantKind.Array)
                     {
                         if (!arg.Values.IsDefault)
                         {
-                            var elements = arg.Values.Select(TypedConstantParser.GetRawTypedConstantValue);
+                            var elementIndex = 0;
+                            var elements = arg.Values.Select(v =>
+                            {
+                                var paramType = parameterTypes != null && elementIndex < parameterTypes.Length
+                                    ? parameterTypes[elementIndex]
+                                    : null;
+
+                                // Check if the parameter type is decimal or nullable decimal
+                                var underlyingType = paramType?.GetNullableUnderlyingType() ?? paramType;
+                                var isDecimalType = underlyingType?.SpecialType == SpecialType.System_Decimal;
+
+                                // For decimal parameters with syntax available, use the original text
+                                if (isDecimalType &&
+                                    syntaxArguments != null && syntaxIndex < syntaxArguments.Count)
+                                {
+                                    var syntaxExpression = syntaxArguments[syntaxIndex].Expression;
+                                    var originalText = syntaxExpression.ToString();
+                                    syntaxIndex++;
+
+                                    // Skip special handling for null values
+                                    if (originalText == "null")
+                                    {
+                                        elementIndex++;
+                                        return "null";
+                                    }
+
+                                    // Check if it's a string literal (starts and ends with quotes)
+                                    if (originalText.StartsWith("\"") && originalText.EndsWith("\""))
+                                    {
+                                        // For string literals, let the normal processing handle it (will use decimal.Parse)
+                                        syntaxIndex--; // Back up so normal processing can handle it
+                                        elementIndex++;
+                                        return TypedConstantParser.GetRawTypedConstantValue(v, paramType);
+                                    }
+
+                                    // Check if it's a constant reference (identifier) rather than a literal
+                                    // Identifiers don't contain dots, parentheses, or other operators
+                                    if (syntaxExpression is NameSyntax)
+                                    {
+                                        // For constant references, use the actual value from TypedConstant
+                                        elementIndex++;
+                                        return TypedConstantParser.GetRawTypedConstantValue(v, paramType);
+                                    }
+
+                                    // For numeric literals, remove any suffix and add 'm' for decimal
+                                    originalText = originalText.TrimEnd('d', 'D', 'f', 'F', 'l', 'L', 'u', 'U', 'm', 'M');
+                                    return $"{originalText}m";
+                                }
+
+                                syntaxIndex++;
+                                elementIndex++;
+                                return TypedConstantParser.GetRawTypedConstantValue(v, paramType);
+                            });
                             argStrings.AddRange(elements);
                         }
                     }
                     else
                     {
-                        argStrings.Add(TypedConstantParser.GetRawTypedConstantValue(arg));
+                        var paramType = parameterTypes != null && i < parameterTypes.Length ? parameterTypes[i] : null;
+
+                        // Check if the parameter type is decimal or nullable decimal
+                        var underlyingType = paramType?.GetNullableUnderlyingType() ?? paramType;
+                        var isDecimalType = underlyingType?.SpecialType == SpecialType.System_Decimal;
+
+                        // For decimal parameters with syntax available, use the original text
+                        if (isDecimalType &&
+                            syntaxArguments != null && syntaxIndex < syntaxArguments.Count)
+                        {
+                            var syntaxExpression = syntaxArguments[syntaxIndex].Expression;
+                            var originalText = syntaxExpression.ToString();
+                            syntaxIndex++;
+
+                            // Skip special handling for null values
+                            if (originalText == "null")
+                            {
+                                argStrings.Add("null");
+                            }
+                            // Check if it's a string literal (starts and ends with quotes)
+                            else if (originalText.StartsWith("\"") && originalText.EndsWith("\""))
+                            {
+                                // For string literals, let the normal processing handle it (will use decimal.Parse)
+                                syntaxIndex--; // Back up so normal processing can handle it
+                                argStrings.Add(TypedConstantParser.GetRawTypedConstantValue(arg, paramType));
+                            }
+                            // Check if it's a constant reference (identifier) rather than a literal
+                            // Identifiers don't contain dots, parentheses, or other operators
+                            else if (syntaxExpression is NameSyntax)
+                            {
+                                // For constant references, use the actual value from TypedConstant
+                                argStrings.Add(TypedConstantParser.GetRawTypedConstantValue(arg, paramType));
+                            }
+                            else
+                            {
+                                // For numeric literals, remove any suffix and add 'm' for decimal
+                                originalText = originalText.TrimEnd('d', 'D', 'f', 'F', 'l', 'L', 'u', 'U', 'm', 'M');
+                                argStrings.Add($"{originalText}m");
+                            }
+                        }
+                        else
+                        {
+                            syntaxIndex++;
+                            argStrings.Add(TypedConstantParser.GetRawTypedConstantValue(arg, paramType));
+                        }
                     }
                 }
                 else
                 {
-                    argStrings.Add(TypedConstantParser.GetRawTypedConstantValue(arg));
+                    var paramType = parameterTypes != null && i < parameterTypes.Length ? parameterTypes[i] : null;
+
+                    // For decimal parameters with syntax available, use the original text
+                    if (paramType?.SpecialType == SpecialType.System_Decimal &&
+                        syntaxArguments != null && syntaxIndex < syntaxArguments.Count)
+                    {
+                        var syntaxExpression = syntaxArguments[syntaxIndex].Expression;
+                        var originalText = syntaxExpression.ToString();
+                        syntaxIndex++;
+                        // Check if it's a string literal (starts and ends with quotes)
+                        if (originalText.StartsWith("\"") && originalText.EndsWith("\""))
+                        {
+                            // For string literals, let the normal processing handle it (will use decimal.Parse)
+                            syntaxIndex--; // Back up so normal processing can handle it
+                            argStrings.Add(TypedConstantParser.GetRawTypedConstantValue(arg, paramType));
+                        }
+                        // Check if it's a constant reference (identifier) rather than a literal
+                        // Identifiers don't contain dots, parentheses, or other operators
+                        else if (syntaxExpression is NameSyntax)
+                        {
+                            // For constant references, use the actual value from TypedConstant
+                            argStrings.Add(TypedConstantParser.GetRawTypedConstantValue(arg, paramType));
+                        }
+                        else
+                        {
+                            // For numeric literals, remove any suffix and add 'm' for decimal
+                            originalText = originalText.TrimEnd('d', 'D', 'f', 'F', 'l', 'L', 'u', 'U', 'm', 'M');
+                            argStrings.Add($"{originalText}m");
+                        }
+                    }
+                    else
+                    {
+                        if (syntaxArguments != null && syntaxIndex < syntaxArguments.Count)
+                        {
+                            syntaxIndex++;
+                        }
+                        argStrings.Add(TypedConstantParser.GetRawTypedConstantValue(arg, paramType));
+                    }
                 }
             }
 
-            writer.Append(string.Join(", ", argStrings));
+            writer.AppendJoin(", ", argStrings);
         }
 
         writer.Append(")");
@@ -100,7 +208,7 @@ internal static class CodeGenerationHelpers
         {
             writer.Append(" { ");
             var namedArgs = attr.NamedArguments.Select(na => $"{na.Key} = {TypedConstantParser.GetRawTypedConstantValue(na.Value)}");
-            writer.Append(string.Join(", ", namedArgs));
+            writer.AppendJoin(", ", namedArgs);
             writer.Append(" }");
         }
 
@@ -110,18 +218,12 @@ internal static class CodeGenerationHelpers
     /// <summary>
     /// Determines if an argument is for a params array parameter.
     /// </summary>
-    private static bool IsParamsArrayArgument(AttributeData attr, int argumentIndex)
+    private static bool IsParamsArrayArgument(AttributeData attr)
     {
         var typeName = attr.AttributeClass!.GloballyQualified();
 
-        if (typeName is "global::TUnit.Core.ArgumentsAttribute" or "global::TUnit.Core.InlineDataAttribute")
-        {
-            return true;
-        }
-
-        return false;
+        return typeName is "global::TUnit.Core.ArgumentsAttribute" or "global::TUnit.Core.InlineDataAttribute";
     }
-
 
     /// <summary>
     /// Determines if an attribute should be excluded from metadata.
@@ -154,120 +256,6 @@ internal static class CodeGenerationHelpers
     }
 
     /// <summary>
-    /// Gets a safe type name for use in typeof() expressions.
-    /// Returns "object" only for actual type parameters or types containing them.
-    /// Returns open generic forms (e.g., List<>) for generic type definitions.
-    /// </summary>
-
-
-    /// <summary>
-    /// Generates C# code for PropertyMetadata array from class properties.
-    /// </summary>
-    public static string GeneratePropertyMetadataArray(INamedTypeSymbol typeSymbol)
-    {
-        var properties = typeSymbol.GetMembers()
-            .OfType<IPropertySymbol>()
-            .Where(p => p.DeclaredAccessibility == Accessibility.Public && !p.IsStatic)
-            .ToList();
-
-        if (properties.Count == 0)
-        {
-            return "System.Array.Empty<global::TUnit.Core.PropertyMetadata>()";
-        }
-
-        using var writer = new CodeWriter("", includeHeader: false);
-        writer.SetIndentLevel(2);
-        using (writer.BeginArrayInitializer("new global::TUnit.Core.PropertyMetadata[]"))
-        {
-            foreach (var prop in properties)
-            {
-                using (writer.BeginObjectInitializer("new global::TUnit.Core.PropertyMetadata", ","))
-                {
-                    writer.AppendLine($"Name = \"{prop.Name}\",");
-                    writer.AppendLine($"Type = typeof({prop.Type.GloballyQualified()}),");
-                    writer.AppendLine($"ReflectionInfo = typeof({typeSymbol.GloballyQualified()}).GetProperty(\"{prop.Name}\"),");
-                    writer.AppendLine("IsStatic = false,");
-                    writer.AppendLine($"IsNullable = {prop.Type.IsNullable().ToString().ToLowerInvariant()},");
-                    writer.AppendLine($"Getter = obj => ((({typeSymbol.GloballyQualified()})obj).{prop.Name}),");
-                    writer.AppendLine("ClassMetadata = null!,");
-                    writer.AppendLine("ContainingTypeMetadata = null!");
-                }
-            }
-        }
-        return writer.ToString().TrimEnd(); // Trim trailing newline for inline use
-    }
-
-    /// <summary>
-    /// Generates C# code for ConstructorMetadata array from class constructors.
-    /// </summary>
-
-    /// <summary>
-    /// Generates C# code for class-level data source providers.
-    /// </summary>
-    public static string GenerateClassDataSourceProviders(INamedTypeSymbol typeSymbol)
-    {
-        var dataSourceAttributes = typeSymbol.GetAttributes()
-            .Where(attr => IsDataSourceAttribute(attr))
-            .ToList();
-
-        if (dataSourceAttributes.Count == 0)
-        {
-            return "System.Array.Empty<global::TUnit.Core.TestDataSource>()";
-        }
-
-        using var writer = new CodeWriter("", includeHeader: false);
-        writer.SetIndentLevel(2);
-        using (writer.BeginArrayInitializer("new global::TUnit.Core.TestDataSource[]"))
-        {
-            foreach (var attr in dataSourceAttributes)
-            {
-                var providerCode = GenerateDataSourceProvider(attr, typeSymbol);
-                if (!string.IsNullOrEmpty(providerCode))
-                {
-                    writer.AppendLine($"{providerCode},");
-                }
-            }
-        }
-        return writer.ToString().TrimEnd(); // Trim trailing newline for inline use
-    }
-
-    /// <summary>
-    /// Generates C# code for method-level data source providers.
-    /// </summary>
-    public static string GenerateMethodDataSourceProviders(IMethodSymbol methodSymbol)
-    {
-        var dataSourceAttributes = methodSymbol.GetAttributes()
-            .Where(attr => IsDataSourceAttribute(attr))
-            .ToList();
-
-        // Also check method parameters for data attributes
-        foreach (var param in methodSymbol.Parameters)
-        {
-            dataSourceAttributes.AddRange(param.GetAttributes().Where(IsDataSourceAttribute));
-        }
-
-        if (dataSourceAttributes.Count == 0)
-        {
-            return "System.Array.Empty<global::TUnit.Core.TestDataSource>()";
-        }
-
-        using var writer = new CodeWriter("", includeHeader: false);
-        writer.SetIndentLevel(2);
-        using (writer.BeginArrayInitializer("new global::TUnit.Core.TestDataSource[]"))
-        {
-            foreach (var attr in dataSourceAttributes)
-            {
-                var providerCode = GenerateDataSourceProvider(attr, methodSymbol.ContainingType);
-                if (!string.IsNullOrEmpty(providerCode))
-                {
-                    writer.AppendLine($"{providerCode},");
-                }
-            }
-        }
-        return writer.ToString().TrimEnd(); // Trim trailing newline for inline use
-    }
-
-    /// <summary>
     /// Determines if an attribute is a data source attribute.
     /// </summary>
     private static bool IsDataSourceAttribute(AttributeData attr)
@@ -282,185 +270,7 @@ internal static class CodeGenerationHelpers
     }
 
     /// <summary>
-    /// Generates a data source provider instance based on the attribute type.
-    /// </summary>
-    private static string GenerateDataSourceProvider(AttributeData attr, INamedTypeSymbol containingType)
-    {
-        var fullName = attr.AttributeClass!.GloballyQualified();
-
-        switch (fullName)
-        {
-            case "TUnit.Core.ArgumentsAttribute":
-            case "TUnit.Core.InlineDataAttribute":
-                return GenerateInlineDataProvider(attr);
-
-            case "TUnit.Core.MethodDataSourceAttribute":
-                return GenerateMethodDataSourceProvider(attr, containingType);
-
-            case "TUnit.Core.PropertyDataSourceAttribute":
-                return GeneratePropertyDataSourceProvider(attr, containingType);
-
-            default:
-                // For custom IDataSourceAttribute implementations (including ClassDataSourceAttribute)
-                return GenerateCustomDataProvider(attr);
-        }
-    }
-
-    private static string GenerateInlineDataProvider(AttributeData attr)
-    {
-        using var writer = new CodeWriter("", includeHeader: false);
-        writer.Append("new global::TUnit.Core.StaticTestDataSource(new object?[][] { new object?[] { ");
-
-        var args = attr.ConstructorArguments.Select(TypedConstantParser.GetRawTypedConstantValue).ToList();
-        writer.Append(string.Join(", ", args));
-        writer.Append(" } })");
-        return writer.ToString().Trim();
-    }
-
-    private static string GenerateMethodDataSourceProvider(AttributeData attr, INamedTypeSymbol containingType)
-    {
-        if (attr.ConstructorArguments.Length == 0)
-        {
-            return "";
-        }
-
-        var methodName = attr.ConstructorArguments[0].Value?.ToString() ?? "";
-        var isShared = attr.NamedArguments.FirstOrDefault(na => na.Key == "Shared").Value.Value as bool? ?? false;
-
-        // Try to determine if this can be optimized for AOT
-        var method = FindDataSourceMethod(methodName, containingType);
-        if (method != null && ShouldUseAotOptimizedDataSource(method))
-        {
-            // Generate code that uses a more AOT-friendly approach
-            return GenerateAotOptimizedDataSource(methodName, containingType, isShared);
-        }
-
-        // Fall back to DynamicTestDataSource for complex cases
-        return $"new global::TUnit.Core.DynamicTestDataSource({isShared.ToString().ToLowerInvariant()}) {{ SourceType = typeof({containingType.GloballyQualified()}), SourceMemberName = \"{methodName}\" }}";
-    }
-
-    private static string GenerateParameterTypesArray(IMethodSymbol method)
-    {
-        if (method.Parameters.Length == 0)
-        {
-            return "System.Type.EmptyTypes";
-        }
-
-        if (method.Parameters.Any(p => ContainsTypeParameter(p.Type)))
-        {
-            return "null";
-        }
-
-        var parameterTypes = method.Parameters
-            .Select(p => $"typeof({p.Type.GloballyQualified()})")
-            .ToArray();
-
-        return $"new System.Type[] {{ {string.Join(", ", parameterTypes)} }}";
-    }
-
-
-    private static string GeneratePropertyDataSourceProvider(AttributeData attr, INamedTypeSymbol containingType)
-    {
-        if (attr.ConstructorArguments.Length == 0)
-        {
-            return "";
-        }
-
-        var propertyName = attr.ConstructorArguments[0].Value?.ToString() ?? "";
-        var isShared = attr.NamedArguments.FirstOrDefault(na => na.Key == "Shared").Value.Value as bool? ?? false;
-
-        // Check if we can use AOT-friendly approach for property data sources
-        var property = containingType.GetMembers(propertyName).OfType<IPropertySymbol>().FirstOrDefault();
-        if (property != null && ShouldUseAotOptimizedPropertyDataSource(property))
-        {
-            return GenerateAotOptimizedPropertyDataSource(propertyName, containingType, isShared);
-        }
-
-        return $"new global::TUnit.Core.DynamicTestDataSource({isShared.ToString().ToLowerInvariant()}) {{ SourceType = typeof({containingType.GloballyQualified()}), SourceMemberName = \"{propertyName}\" }}";
-    }
-
-    private static string GenerateCustomDataProvider(AttributeData attr)
-    {
-        // For custom data attributes that implement IDataSourceAttribute (including AsyncDataSourceGeneratorAttribute),
-        // we need to instantiate the attribute and use it directly
-        var writer = new CodeWriter();
-        AttributeWriter.WriteAttributeWithoutSyntax(writer, attr);
-        return writer.ToString();
-    }
-
-    /// <summary>
-    /// Extracts timeout value from timeout attributes on method or class.
-    /// </summary>
-    public static string ExtractTimeout(IMethodSymbol methodSymbol)
-    {
-        // Check method first, then class
-        var timeoutAttr = methodSymbol.GetAttributes()
-            .FirstOrDefault(attr => attr.AttributeClass!.GloballyQualified() == "TUnit.Core.TimeoutAttribute") ??
-            methodSymbol.ContainingType.GetAttributes()
-            .FirstOrDefault(attr => attr.AttributeClass!.GloballyQualified() == "TUnit.Core.TimeoutAttribute");
-
-        if (timeoutAttr == null || timeoutAttr.ConstructorArguments.Length == 0)
-        {
-            return "null";
-        }
-
-        var timeoutValue = timeoutAttr.ConstructorArguments[0].Value;
-        if (timeoutValue is int milliseconds)
-        {
-            return $"System.TimeSpan.FromMilliseconds({milliseconds})";
-        }
-
-        return "null";
-    }
-
-    /// <summary>
-    /// Checks if test should be skipped and extracts skip reason.
-    /// </summary>
-    public static (bool isSkipped, string skipReason) ExtractSkipInfo(IMethodSymbol methodSymbol)
-    {
-        // Check method first, then class
-        var skipAttr = methodSymbol.GetAttributes()
-            .FirstOrDefault(attr => attr.AttributeClass!.GloballyQualified() == "TUnit.Core.SkipAttribute") ??
-            methodSymbol.ContainingType.GetAttributes()
-            .FirstOrDefault(attr => attr.AttributeClass!.GloballyQualified() == "TUnit.Core.SkipAttribute");
-
-        if (skipAttr == null)
-        {
-            return (false, "null");
-        }
-
-        var reason = skipAttr.ConstructorArguments.Length > 0
-            ? TypedConstantParser.GetRawTypedConstantValue(skipAttr.ConstructorArguments[0])
-            : "\"Test skipped\"";
-
-        return (true, reason);
-    }
-
-    /// <summary>
-    /// Extracts repeat count from repeat attributes.
-    /// </summary>
-    public static int ExtractRepeatCount(IMethodSymbol methodSymbol, INamedTypeSymbol testMethodTypeSymbol)
-    {
-        var repeatAttr = methodSymbol.GetAttributes()
-                .FirstOrDefault(attr => attr.AttributeClass!.Name == "RepeatAttribute")
-            ?? testMethodTypeSymbol.GetAttributesIncludingBaseTypes().FirstOrDefault(attr => attr.AttributeClass!.Name == "RepeatAttribute")
-            ?? testMethodTypeSymbol.ContainingAssembly.GetAttributes().FirstOrDefault(attr => attr.AttributeClass!.Name == "RepeatAttribute");
-
-        if (repeatAttr == null || repeatAttr.ConstructorArguments.Length == 0)
-        {
-            return 0;
-        }
-
-        if (repeatAttr.ConstructorArguments[0].Value is int count and > 0)
-        {
-            return count;
-        }
-
-        return 0;
-    }
-
-    /// <summary>
-    /// Generates all test-related attributes for the TestMetadata.Attributes field.
+    /// Generates all test-related attributes for the TestMetadata.AttributesByType field as a dictionary.
     /// </summary>
     public static string GenerateTestAttributes(IMethodSymbol methodSymbol)
     {
@@ -472,74 +282,89 @@ internal static class CodeGenerationHelpers
 
         if (allAttributes.Count == 0)
         {
-            return "System.Array.Empty<System.Attribute>()";
+            return "new global::System.Collections.Generic.Dictionary<global::System.Type, global::System.Collections.Generic.IReadOnlyList<global::System.Attribute>>().AsReadOnly()";
         }
 
-        // Generate as a single line array to avoid CS8802 parser issues
+        // Group attributes by type
+        var attributesByType = allAttributes
+            .GroupBy(attr => attr.AttributeClass?.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat) ?? "System.Attribute");
+
         using var writer = new CodeWriter("", includeHeader: false);
 
-        // Generate inline array to avoid parser issues
-        using (writer.BeginArrayInitializer("new System.Attribute[]", terminator: ""))
+        // Generate dictionary initializer
+        writer.Append("new global::System.Collections.Generic.Dictionary<global::System.Type, global::System.Collections.Generic.IReadOnlyList<global::System.Attribute>>()");
+        writer.AppendLine();
+        writer.AppendLine("{");
+        writer.Indent();
+
+        foreach (var group in attributesByType)
         {
+            var typeString = group.Key;
+
+            writer.Append($"[typeof({typeString})] = new global::System.Attribute[] {{ ");
+
             var attributeStrings = new List<string>();
-            foreach (var attr in allAttributes)
+            foreach (var attr in group)
             {
-                // Use unified approach for all attributes
                 attributeStrings.Add(GenerateAttributeInstantiation(attr));
             }
-            writer.Append(string.Join(", ", attributeStrings));
+
+            writer.AppendJoin(", ", attributeStrings);
+            writer.AppendLine(" },");
         }
+
+        writer.Unindent();
+        writer.Append("}.AsReadOnly()");
 
         return writer.ToString().Trim();
     }
 
     /// <summary>
-    /// Generates C# code to create a TypeReference from an ITypeSymbol.
+    /// Generates C# code to create a TypeInfo from an ITypeSymbol.
     /// </summary>
-    public static string GenerateTypeReference(ITypeSymbol typeSymbol)
+    public static string GenerateTypeInfo(ITypeSymbol typeSymbol)
     {
         if (typeSymbol is ITypeParameterSymbol typeParameter)
         {
             // This is a generic parameter (e.g., T, TKey)
             var position = GetGenericParameterPosition(typeParameter);
             var isMethodParameter = typeParameter.DeclaringMethod != null;
-            return $@"global::TUnit.Core.TypeReference.CreateGenericParameter({position}, {(isMethodParameter ? "true" : "false")}, ""{typeParameter.Name}"")";
-        }
-
-        if (typeSymbol is IArrayTypeSymbol arrayType)
-        {
-            // This is an array type
-            var elementTypeRef = GenerateTypeReference(arrayType.ElementType);
-            return $@"global::TUnit.Core.TypeReference.CreateArray({elementTypeRef}, {arrayType.Rank})";
-        }
-
-        if (typeSymbol is IPointerTypeSymbol pointerType)
-        {
-            // This is a pointer type
-            var elementTypeRef = GenerateTypeReference(pointerType.PointedAtType);
-            return $@"new global::TUnit.Core.TypeReference {{ IsPointer = true, ElementType = {elementTypeRef} }}";
+            return $@"new global::TUnit.Core.GenericParameter({position}, {(isMethodParameter ? "true" : "false")}, ""{typeParameter.Name}"")";
         }
 
         if (typeSymbol is INamedTypeSymbol { IsGenericType: true, IsUnboundGenericType: false } namedType)
         {
             // This is a constructed generic type (e.g., List<int>, Dictionary<string, T>)
-            var genericDef = GetGenericTypeDefinitionName(namedType);
-            var genericArgs = namedType.TypeArguments.Select(GenerateTypeReference).ToArray();
+            // Check if all type arguments are concrete (no generic parameters)
+            var hasGenericParameters = namedType.TypeArguments.Any(ContainsTypeParameter);
 
-            using var writer = new CodeWriter("", includeHeader: false);
-            writer.SetIndentLevel(1);
-            writer.Append($@"global::TUnit.Core.TypeReference.CreateConstructedGeneric(""{genericDef}""");
-            foreach (var arg in genericArgs)
+            if (hasGenericParameters)
             {
-                writer.Append($", {arg}");
+                // Has generic parameters - use ConstructedGeneric
+                var genericDefType = GetTypeOfExpression(namedType.ConstructUnboundGenericType());
+                var genericArgs = namedType.TypeArguments.Select(GenerateTypeInfo).ToArray();
+
+                using var writer = new CodeWriter("", includeHeader: false);
+                writer.SetIndentLevel(1);
+                writer.Append($@"new global::TUnit.Core.ConstructedGeneric({genericDefType}, [{string.Join(", ", genericArgs)}])");
+                return writer.ToString().Trim();
             }
-            writer.Append(")");
-            return writer.ToString().Trim();
+            // All type arguments are concrete - this is just a concrete type
+            // Fall through to regular typeof() handling
         }
 
-        // Regular concrete type
-        var assemblyQualifiedName = GetAssemblyQualifiedName(typeSymbol);
-        return $@"global::TUnit.Core.TypeReference.CreateConcrete(""{assemblyQualifiedName}"")";
+        // Regular concrete type (including fully closed generic types like List<int>)
+        var typeOfExpression = GetTypeOfExpression(typeSymbol);
+        return $@"new global::TUnit.Core.ConcreteType({typeOfExpression})";
+    }
+
+    /// <summary>
+    /// Generates a typeof() expression for the given type symbol.
+    /// </summary>
+    private static string GetTypeOfExpression(ITypeSymbol typeSymbol)
+    {
+        var fullyQualifiedName = typeSymbol.ToDisplayString(DisplayFormats.FullyQualifiedGenericWithGlobalPrefix);
+        return $"typeof({fullyQualifiedName})";
     }
 
     private static int GetGenericParameterPosition(ITypeParameterSymbol typeParameter)
@@ -554,122 +379,4 @@ internal static class CodeGenerationHelpers
         }
         return 0;
     }
-
-    private static string GetGenericTypeDefinitionName(INamedTypeSymbol namedType)
-    {
-        // Get the unbound generic type (e.g., List`1)
-        var unboundType = namedType.ConstructUnboundGenericType();
-        return GetAssemblyQualifiedName(unboundType);
-    }
-
-    private static string GetAssemblyQualifiedName(ITypeSymbol typeSymbol)
-    {
-        // Build assembly qualified name
-        var typeName = typeSymbol.ToDisplayString(DisplayFormats.FullyQualifiedGenericWithoutGlobalPrefix);
-
-        if (typeSymbol.ContainingAssembly.Name is "System.Private.CoreLib" or "mscorlib")
-        {
-            return $"{typeName}, System.Private.CoreLib";
-        }
-
-        return $"{typeName}, {typeSymbol.ContainingAssembly.Name}";
-    }
-
-    #region Compile-Time Data Source Resolution
-
-    /// <summary>
-    /// Finds a data source method in the containing type.
-    /// </summary>
-    private static IMethodSymbol? FindDataSourceMethod(string methodName, INamedTypeSymbol containingType)
-    {
-        return containingType.GetMembers(methodName)
-            .OfType<IMethodSymbol>()
-            .FirstOrDefault(m => m.Parameters.Length == 0);
-    }
-
-    /// <summary>
-    /// Determines if a method should use AOT-optimized data source generation.
-    /// </summary>
-    private static bool ShouldUseAotOptimizedDataSource(IMethodSymbol method)
-    {
-        if (!method.IsStatic)
-        {
-            return false;
-        }
-        if (method.Parameters.Length > 0)
-        {
-            return false;
-        }
-
-        var returnType = method.ReturnType;
-
-        if (returnType is INamedTypeSymbol namedType)
-        {
-            var typeString = namedType.ToDisplayString();
-
-            return typeString.Contains("IEnumerable<") ||
-                   typeString.Contains("ICollection<") ||
-                   typeString.Contains("List<") ||
-                   typeString == "object[][]" ||
-                   typeString.Contains("object[]");
-        }
-
-        return false;
-    }
-
-    /// <summary>
-    /// Generates AOT-optimized data source code that avoids reflection.
-    /// </summary>
-    private static string GenerateAotOptimizedDataSource(string methodName, INamedTypeSymbol containingType, bool isShared)
-    {
-        return $"new global::TUnit.Core.AotFriendlyTestDataSource({isShared.ToString().ToLowerInvariant()}) {{ " +
-               $"MethodInvoker = () => {containingType.GloballyQualified()}.{methodName}(), " +
-               $"SourceType = typeof({containingType.GloballyQualified()}), " +
-               $"SourceMemberName = \"{methodName}\" }}";
-    }
-
-
-    /// <summary>
-    /// Generates AOT-optimized property data source code that avoids reflection.
-    /// </summary>
-    private static string GenerateAotOptimizedPropertyDataSource(string propertyName, INamedTypeSymbol containingType, bool isShared)
-    {
-        return $"new global::TUnit.Core.AotFriendlyTestDataSource({isShared.ToString().ToLowerInvariant()}) {{ " +
-               $"MethodInvoker = () => new {containingType.GloballyQualified()}().{propertyName}, " +
-               $"SourceType = typeof({containingType.GloballyQualified()}), " +
-               $"SourceMemberName = \"{propertyName}\" }}";
-    }
-
-    /// <summary>
-    /// Determines if a property should use AOT-optimized data source generation.
-    /// </summary>
-    private static bool ShouldUseAotOptimizedPropertyDataSource(IPropertySymbol property)
-    {
-        if (!property.IsStatic)
-        {
-            var containingType = property.ContainingType;
-            var hasParameterlessConstructor = containingType.Constructors.Any(c => c.Parameters.Length == 0);
-            if (!hasParameterlessConstructor)
-            {
-                return false;
-            }
-        }
-
-        var returnType = property.Type;
-
-        if (returnType is INamedTypeSymbol namedType)
-        {
-            var typeString = namedType.ToDisplayString();
-
-            return typeString.Contains("IEnumerable<") ||
-                   typeString.Contains("ICollection<") ||
-                   typeString.Contains("List<") ||
-                   typeString == "object[][]" ||
-                   typeString.Contains("object[]");
-        }
-
-        return false;
-    }
-
-    #endregion
 }

@@ -18,6 +18,20 @@ public static class ArgumentFormatter
         return FormatDefault(o);
     }
 
+    public static string Format(object? o, Type? parameterType, List<Func<object?, string?>> formatters)
+    {
+        foreach (var formatter in formatters)
+        {
+            var result = formatter(o);
+            if (result != null)
+            {
+                return result;
+            }
+        }
+
+        return FormatDefault(o, parameterType);
+    }
+
     public static string GetConstantValue(TestContext testContext, object? o)
     {
         return Format(o, testContext.ArgumentDisplayFormatters);
@@ -25,43 +39,99 @@ public static class ArgumentFormatter
 
     public static string FormatArguments(IEnumerable<object?> arguments)
     {
-        return string.Join(", ", arguments.Select(arg => FormatDefault(arg)));
+        if (arguments is IList<object?> list)
+        {
+            if (list.Count == 0)
+                return string.Empty;
+
+            var formatted = new string[list.Count];
+            for (int i = 0; i < list.Count; i++)
+            {
+                formatted[i] = FormatDefault(list[i]);
+            }
+            return string.Join(", ", formatted);
+        }
+
+        var elements = new List<string>();
+        foreach (var arg in arguments)
+        {
+            elements.Add(FormatDefault(arg));
+        }
+
+        return elements.Count == 0 ? string.Empty : string.Join(", ", elements);
     }
 
     private static string FormatDefault(object? o)
+    {
+        return FormatDefault(o, parameterType: null);
+    }
+
+    private static string FormatDefault(object? o, Type? parameterType)
     {
         if (o is null)
         {
             return "null";
         }
 
-        // Handle tuples specially
-        if (TupleHelper.IsTupleType(o.GetType()))
+        var type = o.GetType();
+
+        // If the value is a numeric type but the parameter type is an enum,
+        // convert to the enum for display purposes (e.g., MatrixDataSource
+        // stores enum values as their underlying numeric type)
+        var resolvedParameterType = parameterType != null ? Nullable.GetUnderlyingType(parameterType) ?? parameterType : null;
+        if (resolvedParameterType is { IsEnum: true } && !type.IsEnum)
+        {
+            try
+            {
+                var enumValue = Enum.ToObject(resolvedParameterType, o);
+                return enumValue.ToString() ?? type.Name;
+            }
+            catch (ArgumentException)
+            {
+                // Value cannot be converted to the enum type - fall through to default formatting
+            }
+        }
+
+        if (TupleHelper.IsTupleType(type))
         {
             return FormatTuple(o);
         }
 
-        // Handle arrays and collections by showing their elements
         if (o is IEnumerable enumerable and not string)
         {
             return FormatEnumerable(enumerable);
         }
 
-        var toString = o.ToString()!;
+        string toString;
+        try
+        {
+            toString = o.ToString()!;
+        }
+        catch
+        {
+            // If ToString() throws, fall back to type name
+            return type.Name;
+        }
 
         if (o is Enum)
         {
             return toString;
         }
 
-        if (o.GetType().IsPrimitive || o is string)
+        if (type.IsPrimitive)
         {
             return toString;
         }
 
-        if (toString == o.GetType().FullName || toString == o.GetType().AssemblyQualifiedName)
+        if (o is string str)
         {
-            return o.GetType().Name;
+            // Replace dots with middle dot (·) to prevent VS Test Explorer from interpreting them as namespace separators
+            return str.Replace(".", "·");
+        }
+
+        if (toString == type.FullName || toString == type.AssemblyQualifiedName)
+        {
+            return type.Name;
         }
 
         return toString;
@@ -70,27 +140,39 @@ public static class ArgumentFormatter
     private static string FormatTuple(object tuple)
     {
         var elements = TupleHelper.UnwrapTuple(tuple);
-        var formattedElements = elements.Select(e => FormatDefault(e));
-        return $"({string.Join(", ", formattedElements)})";
+        var formatted = new string[elements.Length];
+        for (int i = 0; i < elements.Length; i++)
+        {
+            formatted[i] = FormatDefault(elements[i]);
+        }
+        return $"({string.Join(", ", formatted)})";
     }
 
     private static string FormatEnumerable(IEnumerable enumerable)
     {
-        var elements = new List<string>();
-        var count = 0;
-        const int maxElements = 10; // Limit to prevent huge displays
+        const int maxElements = 10;
+        Span<string?> elements = [null, null, null, null, null, null, null, null, null, null, null];
 
-        foreach (var element in enumerable)
+        var count = 0;
+        try
         {
-            if (count >= maxElements)
+            foreach (var element in enumerable)
             {
-                elements.Add("...");
-                break;
+                if (count >= maxElements)
+                {
+                    elements[count] ="...";
+                    break;
+                }
+                elements[count] = FormatDefault(element);
+                count++;
             }
-            elements.Add(FormatDefault(element));
-            count++;
+        }
+        catch
+        {
+            // If GetEnumerator() or MoveNext() throws, fall back to type name
+            return enumerable.GetType().Name;
         }
 
-        return string.Join(", ", elements);
+        return string.Join(", ", elements[..count]);
     }
 }

@@ -4,9 +4,37 @@ using TUnit.Core.Extensions;
 
 namespace TUnit.Core;
 
+/// <summary>
+/// Generates test cases from all combinations (Cartesian product) of parameter values.
+/// </summary>
+/// <remarks>
+/// <para>
+/// For boolean parameters, all values (<c>true</c>, <c>false</c>) are generated automatically.
+/// For enum parameters, all defined enum values are generated automatically.
+/// For other types, use <c>[Matrix(...)]</c> on individual parameters to specify the values.
+/// </para>
+/// <para>
+/// Use <see cref="MatrixExclusionAttribute"/> on the test method to exclude specific combinations.
+/// </para>
+/// </remarks>
+/// <example>
+/// <code>
+/// [Test, MatrixDataSource]
+/// public void TestAllCombinations(
+///     [Matrix(1, 2, 3)] int x,
+///     [Matrix("a", "b")] string y)
+/// {
+///     // Generates 6 test cases: (1,"a"), (1,"b"), (2,"a"), (2,"b"), (3,"a"), (3,"b")
+/// }
+///
+/// [Test, MatrixDataSource]
+/// public void TestWithEnum(bool enabled, MyEnum mode)
+/// {
+///     // Automatically generates all bool x enum combinations
+/// }
+/// </code>
+/// </example>
 [AttributeUsage(AttributeTargets.Class | AttributeTargets.Method)]
-[UnconditionalSuppressMessage("AOT", "IL2109:Type 'MatrixDataSourceAttribute' derives from base class with RequiresUnreferencedCodeAttribute",
-    Justification = "Matrix data source implementation is AOT-compatible with proper enum field preservation")]
 public sealed class MatrixDataSourceAttribute : UntypedDataSourceGeneratorAttribute, IAccessesInstanceData
 {
     protected override IEnumerable<Func<object?[]?>> GenerateDataSources(DataGeneratorMetadata dataGeneratorMetadata)
@@ -38,32 +66,38 @@ public sealed class MatrixDataSourceAttribute : UntypedDataSourceGeneratorAttrib
 
         foreach (var row in GetMatrixValues(parameterInformation.Select(p => GetAllArguments(dataGeneratorMetadata, p))))
         {
-            if (exclusions.Any(e => IsExcluded(e, row)))
+            var rowArray = row.ToArray();
+
+            if (exclusions.Any(e => IsExcluded(e, rowArray)))
             {
                 continue;
             }
 
-            yield return () => row.ToArray();
+            yield return () => rowArray;
         }
     }
 
-    private bool IsExcluded(object?[] exclusion, IEnumerable<object?> row)
+    private bool IsExcluded(object?[] exclusion, object?[] rowArray)
     {
-        var rowArray = row.ToArray();
         if (exclusion.Length != rowArray.Length)
         {
             return false;
         }
 
-        for (int i = 0; i < exclusion.Length; i++)
+        for (var i = 0; i < exclusion.Length; i++)
         {
             var exclusionValue = exclusion[i];
             var rowValue = rowArray[i];
 
-            // Handle enum to underlying type conversion
-            if (exclusionValue != null && exclusionValue.GetType().IsEnum && rowValue != null)
+            // Handle enum to underlying type conversion for both values
+            if (exclusionValue != null && exclusionValue.GetType().IsEnum)
             {
                 exclusionValue = Convert.ChangeType(exclusionValue, Enum.GetUnderlyingType(exclusionValue.GetType()));
+            }
+
+            if (rowValue != null && rowValue.GetType().IsEnum)
+            {
+                rowValue = Convert.ChangeType(rowValue, Enum.GetUnderlyingType(rowValue.GetType()));
             }
 
             if (!Equals(exclusionValue, rowValue))
@@ -84,19 +118,32 @@ public sealed class MatrixDataSourceAttribute : UntypedDataSourceGeneratorAttrib
             .ToArray();
     }
 
-    [UnconditionalSuppressMessage("AOT", "IL2072:Target parameter argument does not satisfy DynamicallyAccessedMemberTypes requirements",
-        Justification = "Test parameter types are comprehensively preserved by the source generation system for matrix data scenarios")]
     private IReadOnlyList<object?> GetAllArguments(DataGeneratorMetadata dataGeneratorMetadata,
         ParameterMetadata sourceGeneratedParameterInformation)
     {
-        if (sourceGeneratedParameterInformation.ReflectionInfo == null)
-        {
-            throw new InvalidOperationException($"Parameter reflection information is not available for parameter '{sourceGeneratedParameterInformation.Name}'. This typically occurs when using instance method data sources which are not supported at compile time.");
-        }
+        // Get MatrixAttribute on this parameter
+        // Prefer cached attributes from source generator for AOT compatibility
+        MatrixAttribute? matrixAttribute;
 
-        var matrixAttribute = sourceGeneratedParameterInformation.ReflectionInfo.GetCustomAttributesSafe()
-            .OfType<MatrixAttribute>()
-            .FirstOrDefault();
+        if (sourceGeneratedParameterInformation.CachedDataSourceAttributes != null)
+        {
+            // Source-generated mode: use cached attributes (no reflection!)
+            matrixAttribute = sourceGeneratedParameterInformation.CachedDataSourceAttributes
+                .OfType<MatrixAttribute>()
+                .FirstOrDefault();
+        }
+        else
+        {
+            // Reflection mode: fall back to runtime attribute discovery
+            if (sourceGeneratedParameterInformation.ReflectionInfo == null)
+            {
+                throw new InvalidOperationException($"Parameter reflection information is not available for parameter '{sourceGeneratedParameterInformation.Name}'. This typically occurs when using instance method data sources which are not supported at compile time.");
+            }
+
+            matrixAttribute = sourceGeneratedParameterInformation.ReflectionInfo.GetCustomAttributesSafe()
+                .OfType<MatrixAttribute>()
+                .FirstOrDefault();
+        }
 
         // Check if this is an instance data attribute and we don't have an instance
         if (matrixAttribute is IAccessesInstanceData && dataGeneratorMetadata.TestClassInstance == null)
@@ -159,13 +206,9 @@ public sealed class MatrixDataSourceAttribute : UntypedDataSourceGeneratorAttrib
 
         if (resolvedType.IsEnum)
         {
-#if NET
-        var enumValues = Enum.GetValuesAsUnderlyingType(resolvedType)
-                             .Cast<object?>();
-#else
-            var enumValues = Enum.GetValues(resolvedType)
-                .Cast<object?>();
-#endif
+            var enumValues = Enum.GetValuesAsUnderlyingType(resolvedType)
+                                 .Cast<object?>();
+
             if (isNullable)
             {
                 enumValues = enumValues.Append(null);
@@ -176,11 +219,7 @@ public sealed class MatrixDataSourceAttribute : UntypedDataSourceGeneratorAttrib
             }
 
             return enumValues
-#if NET
                .Except(matrixAttribute?.Excluding?.Select(e => Convert.ChangeType(e, Enum.GetUnderlyingType(resolvedType))) ?? [])
-#else
-                .Except(matrixAttribute?.Excluding ?? [])
-#endif
                 .ToArray();
         }
 

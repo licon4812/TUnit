@@ -1,14 +1,15 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
-    <EnablePolyfill>false</EnablePolyfill>
+    <EnableTUnitPolyfills>false</EnableTUnitPolyfills>
     <NoWarn>$(NoWarn);NU1510</NoWarn>
   </PropertyGroup>
 
   <Import Project="..\Library.props" />
 
   <ItemGroup>
-    <InternalsVisibleTo Include="TUnit.Engine" />
     <InternalsVisibleTo Include="TUnit.UnitTests" />
+    <InternalsVisibleTo Include="TUnit.Engine.Tests" />
+    <InternalsVisibleTo Include="TUnit.OpenTelemetry.Tests" />
   </ItemGroup>
 
   <ItemGroup>
@@ -33,7 +34,10 @@
   <ItemGroup>
     <ProjectReference Include="..\TUnit.Core\TUnit.Core.csproj" />
   </ItemGroup>
-  <ItemGroup Condition="'$(IsPackTarget)' == 'true'">
+  <ItemGroup>
     <PackageReference Include="Microsoft.Testing.Platform.MSBuild" />
   </ItemGroup>
+
+  <Import Project="..\Library.targets" />
+
 </Project>

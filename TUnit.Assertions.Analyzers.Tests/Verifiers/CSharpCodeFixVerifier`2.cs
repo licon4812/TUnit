@@ -4,7 +4,8 @@ using Microsoft.CodeAnalysis.CodeFixes;
 using Microsoft.CodeAnalysis.CSharp.Testing;
 using Microsoft.CodeAnalysis.Diagnostics;
 using Microsoft.CodeAnalysis.Testing;
-using TUnit.Assertions.AssertionBuilders;
+using TUnit.Assertions;
+using TUnit.Core;
 
 namespace TUnit.Assertions.Analyzers.Tests.Verifiers;
 
@@ -39,8 +40,8 @@ public static partial class CSharpCodeFixVerifier<TAnalyzer, TCodeFix>
             {
                 AdditionalReferences =
                 {
-                    typeof(TUnitAttribute).Assembly.Location,
-                    typeof(AssertionBuilder).Assembly.Location,
+                    TUnit.Tests.Shared.AnalyzerTestCompatibility.GetCompatibleDllPath("TUnit.Core", typeof(TUnitAttribute).Assembly),
+                    TUnit.Tests.Shared.AnalyzerTestCompatibility.GetCompatibleDllPath("TUnit.Assertions", typeof(Assert).Assembly),
                 },
             },
         };
@@ -73,8 +74,8 @@ public static partial class CSharpCodeFixVerifier<TAnalyzer, TCodeFix>
             {
                 AdditionalReferences =
                 {
-                    typeof(TUnitAttribute).Assembly.Location,
-                    typeof(AssertionBuilder).Assembly.Location,
+                    TUnit.Tests.Shared.AnalyzerTestCompatibility.GetCompatibleDllPath("TUnit.Core", typeof(TUnitAttribute).Assembly),
+                    TUnit.Tests.Shared.AnalyzerTestCompatibility.GetCompatibleDllPath("TUnit.Assertions", typeof(Assert).Assembly),
                 },
             },
         };

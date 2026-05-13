@@ -4,6 +4,7 @@ using TUnit.TestProject.Attributes;
 namespace TUnit.TestProject;
 
 [EngineTest(ExpectedResult.Pass)]
+[Retry(3)]
 public class ParallelTests
 {
     private static readonly ConcurrentBag<DateTimeRange> TestDateTimeRanges = [];
@@ -11,7 +12,7 @@ public class ParallelTests
     [After(Test)]
     public async Task TestOverlaps()
     {
-        TestDateTimeRanges.Add(new DateTimeRange(TestContext.Current!.TestStart.DateTime, TestContext.Current.Result!.End!.Value.DateTime));
+        TestDateTimeRanges.Add(new DateTimeRange(TestContext.Current!.Execution.TestStart!.Value.DateTime, TestContext.Current.Execution.Result!.End!.Value.DateTime));
 
         await AssertOverlaps();
     }

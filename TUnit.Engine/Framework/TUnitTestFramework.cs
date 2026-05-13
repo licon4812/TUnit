@@ -1,10 +1,12 @@
 using System.Collections.Concurrent;
+using System.Diagnostics.CodeAnalysis;
 using Microsoft.Testing.Platform.Capabilities.TestFramework;
 using Microsoft.Testing.Platform.Extensions;
 using Microsoft.Testing.Platform.Extensions.Messages;
 using Microsoft.Testing.Platform.Extensions.TestFramework;
 using Microsoft.Testing.Platform.Requests;
 using TUnit.Core;
+using TUnit.Engine.Services;
 
 namespace TUnit.Engine.Framework;
 
@@ -41,18 +43,27 @@ internal sealed class TUnitTestFramework : ITestFramework, IDataProducer
         return Task.FromResult(new CreateTestSessionResult { IsSuccess = true });
     }
 
+    #if NET8_0_OR_GREATER
+    [UnconditionalSuppressMessage("Trimming", "IL2046", Justification = "Reflection mode is not used in AOT/trimmed scenarios")]
+    [UnconditionalSuppressMessage("AOT", "IL3051", Justification = "Reflection mode is not used in AOT scenarios")]
+    #endif
     public async Task ExecuteRequestAsync(ExecuteRequestContext context)
     {
         try
         {
             var serviceProvider = GetOrCreateServiceProvider(context);
 
-            serviceProvider.Initializer.Initialize(context);
-
+            // Install contexts before init runs so anything reading GlobalContext.Current
+            // sees the populated instance instead of the lazy fallback (null TestFilter).
             GlobalContext.Current = serviceProvider.ContextProvider.GlobalContext;
+            GlobalContext.Current.GlobalLogger = serviceProvider.Logger;
             BeforeTestDiscoveryContext.Current = serviceProvider.ContextProvider.BeforeTestDiscoveryContext;
             TestDiscoveryContext.Current = serviceProvider.ContextProvider.TestDiscoveryContext;
             TestSessionContext.Current = serviceProvider.ContextProvider.TestSessionContext;
+
+            serviceProvider.Initializer.Initialize(context);
+
+            await serviceProvider.HookDelegateBuilder.InitializeAsync();
 
             serviceProvider.CancellationToken.Initialise(context.CancellationToken);
 
@@ -60,24 +71,23 @@ internal sealed class TUnitTestFramework : ITestFramework, IDataProducer
         }
         catch (Exception e) when (IsCancellationException(e))
         {
-            // Check if this is a normal cancellation or fail-fast cancellation
-            if (context.CancellationToken.IsCancellationRequested)
-            {
-                await GetOrCreateServiceProvider(context).Logger.LogErrorAsync("The test run was cancelled.");
-            }
-            else
-            {
-                // This is likely a fail-fast cancellation
-                await GetOrCreateServiceProvider(context).Logger.LogErrorAsync("Test execution stopped due to fail-fast.");
-            }
+            var message = context.CancellationToken.IsCancellationRequested
+                ? "The test run was cancelled."
+                : "Test execution stopped due to fail-fast.";
+            await GetOrCreateServiceProvider(context).Logger.LogErrorAsync(message);
 
+            // Re-throw is safe here — MTP handles OperationCanceledException specially.
             throw;
         }
         catch (Exception e)
         {
-            await GetOrCreateServiceProvider(context).Logger.LogErrorAsync(e);
+            var serviceProvider = GetOrCreateServiceProvider(context);
+            await serviceProvider.Logger.LogErrorAsync(e);
             await ReportUnhandledException(context, e);
-            throw;
+
+            // Do NOT re-throw — MTP hosts expect errors via CloseTestSessionResult,
+            // not propagated exceptions. Re-throwing breaks JSON-RPC transports (#5263).
+            serviceProvider.SessionFailed = true;
         }
         finally
         {
@@ -87,12 +97,19 @@ internal sealed class TUnitTestFramework : ITestFramework, IDataProducer
 
     public async Task<CloseTestSessionResult> CloseTestSessionAsync(CloseTestSessionContext context)
     {
+        bool isSuccess = true;
+
         if (_serviceProvidersPerSession.TryRemove(context.SessionUid.Value, out var serviceProvider))
         {
-            await serviceProvider.DisposeAsync();
+            if (serviceProvider.SessionFailed)
+            {
+                isSuccess = false;
+            }
+
+            await serviceProvider.DisposeAsync().ConfigureAwait(false);
         }
 
-        return new CloseTestSessionResult { IsSuccess = true };
+        return new CloseTestSessionResult { IsSuccess = isSuccess };
     }
 
     private TUnitServiceProvider GetOrCreateServiceProvider(ExecuteRequestContext context)

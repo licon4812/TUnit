@@ -1,5 +1,7 @@
-﻿using BenchmarkDotNet.Attributes;
+﻿using System.Runtime.InteropServices;
+using BenchmarkDotNet.Attributes;
 using CliWrap;
+using CliWrap.Buffered;
 
 namespace Tests.Benchmark;
 
@@ -7,54 +9,75 @@ namespace Tests.Benchmark;
 public class RuntimeBenchmarks : BenchmarkBase
 {
     private static readonly string? ClassName = Environment.GetEnvironmentVariable("CLASS_NAME");
-    
+
     [Benchmark]
-    [BenchmarkCategory("Runtime")]
+    [BenchmarkCategory("Runtime", "AOT")]
     public async Task TUnit_AOT()
     {
-        await Cli.Wrap(Path.Combine(UnitPath, $"aot-publish-{Framework.Replace(".0", "")}", GetExecutableFileName()))
+        var aotPath = Path.Combine(UnifiedPath, "bin", "Release-TUNIT-AOT", Framework);
+        var exeName = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "UnifiedTests.exe" : "UnifiedTests";
+
+        await Cli.Wrap(Path.Combine(aotPath, exeName))
             .WithArguments(["--treenode-filter",  $"/*/*/{ClassName}/*"])
+            .WithEnvironmentVariables(new Dictionary<string, string?>
+            {
+                ["TUNIT_DISABLE_GITHUB_REPORTER"] = "true",
+                ["TUNIT_DISABLE_HTML_REPORTER"] = "true"
+            })
             .WithStandardOutputPipe(PipeTarget.ToStream(OutputStream))
-            .ExecuteAsync();
+            .ExecuteBufferedAsync();
     }
 
     [Benchmark]
     public async Task TUnit()
     {
-        await Cli.Wrap("dotnet")
-            .WithArguments(["run", "--no-build", "-c", "Release", "--treenode-filter",  $"/*/*/{ClassName}/*", "--framework", Framework])
-            .WithWorkingDirectory(UnitPath)
+        var binPath = Path.Combine(UnifiedPath, "bin", "Release-TUNIT", Framework);
+        var exeName = GetExecutableFileName();
+
+        await Cli.Wrap(Path.Combine(binPath, exeName))
+            .WithArguments(["--treenode-filter",  $"/*/*/{ClassName}/*"])
+            .WithEnvironmentVariables(new Dictionary<string, string?>
+            {
+                ["TUNIT_DISABLE_GITHUB_REPORTER"] = "true",
+                ["TUNIT_DISABLE_HTML_REPORTER"] = "true"
+            })
             .WithStandardOutputPipe(PipeTarget.ToStream(OutputStream))
-            .ExecuteAsync();
+            .ExecuteBufferedAsync();
     }
 
     [Benchmark]
     public async Task NUnit()
     {
-        await Cli.Wrap("dotnet")
-            .WithArguments(["test", "--no-build", "-c", "Release", "--filter", $"FullyQualifiedName~{ClassName}", "--framework", Framework])
-            .WithWorkingDirectory(NUnitPath)
-            .WithStandardOutputPipe(PipeTarget.ToStream(OutputStream))
-            .ExecuteAsync();
-    }
+        var binPath = Path.Combine(UnifiedPath, "bin", "Release-NUNIT", Framework);
+        var exeName = GetExecutableFileName();
 
-    [Benchmark]
-    public async Task xUnit()
-    {
-        await Cli.Wrap("dotnet")
-            .WithArguments(["test", "--no-build", "-c", "Release", "--filter", $"FullyQualifiedName~{ClassName}", "--framework", Framework])
-            .WithWorkingDirectory(XUnitPath)
+        await Cli.Wrap(Path.Combine(binPath, exeName))
+            .WithArguments(["--filter", $"FullyQualifiedName~{ClassName}"])
             .WithStandardOutputPipe(PipeTarget.ToStream(OutputStream))
-            .ExecuteAsync();
+            .ExecuteBufferedAsync();
     }
 
     [Benchmark]
     public async Task MSTest()
     {
-        await Cli.Wrap("dotnet")
-            .WithArguments(["test", "--no-build", "-c", "Release", "--filter", $"FullyQualifiedName~{ClassName}", "--framework", Framework])
-            .WithWorkingDirectory(MsTestPath)
+        var binPath = Path.Combine(UnifiedPath, "bin", "Release-MSTEST", Framework);
+        var exeName = GetExecutableFileName();
+
+        await Cli.Wrap(Path.Combine(binPath, exeName))
+            .WithArguments(["--filter", $"FullyQualifiedName~{ClassName}"])
             .WithStandardOutputPipe(PipeTarget.ToStream(OutputStream))
-            .ExecuteAsync();
+            .ExecuteBufferedAsync();
+    }
+
+    [Benchmark]
+    public async Task xUnit3()
+    {
+        var binPath = Path.Combine(UnifiedPath, "bin", "Release-XUNIT3", Framework);
+        var exeName = GetExecutableFileName();
+
+        await Cli.Wrap(Path.Combine(binPath, exeName))
+            .WithArguments(["--filter-query", $"/*/*/{ClassName}/*"])
+            .WithStandardOutputPipe(PipeTarget.ToStream(OutputStream))
+            .ExecuteBufferedAsync();
     }
 }

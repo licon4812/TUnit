@@ -1,5 +1,4 @@
 ﻿using System.Diagnostics.CodeAnalysis;
-using TUnit.Assertions.AssertConditions.Throws;
 
 namespace TUnit.Assertions.Tests.Assertions.Delegates;
 
@@ -11,19 +10,18 @@ public partial class Throws
         public async Task Fails_For_Code_Without_Exceptions()
         {
             var expectedMessage = """
-                                  Expected action to throw an exception
-                                  
-                                  but none was thrown
-                                  
+                                  Expected to throw Exception
+                                  but no exception was thrown
+
                                   at Assert.That(action).ThrowsException()
-                                  """;
+                                  """.NormalizeLineEndings();
             var action = () => { };
 
             var sut = async ()
                 => await Assert.That(action).ThrowsException();
 
-            await Assert.That(sut).ThrowsException()
-                .WithMessage(expectedMessage);
+            var thrownException = await Assert.That(sut).ThrowsException();
+            await Assert.That(thrownException.Message.NormalizeLineEndings()).IsEqualTo(expectedMessage);
         }
 
         [Test]

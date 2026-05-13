@@ -1,4 +1,5 @@
 ﻿using System.Diagnostics.CodeAnalysis;
+using System.Globalization;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
@@ -16,6 +17,17 @@ public sealed class FullyQualifiedWithGlobalPrefixRewriter(SemanticModel semanti
     public override SyntaxNode? VisitMemberAccessExpression(MemberAccessExpressionSyntax node)
     {
         var symbol = node.GetSymbolInfo(semanticModel);
+
+        // Special handling for double/float special constants (NaN, PositiveInfinity, NegativeInfinity)
+        if (symbol is IFieldSymbol { IsConst: true, ContainingType.SpecialType: SpecialType.System_Double or SpecialType.System_Single, HasConstantValue: true } fieldSymbol)
+            // Get the constant value and use the helper to create the appropriate syntax
+        {
+            var specialSyntax = SpecialFloatingPointValuesHelper.TryCreateSpecialFloatingPointSyntax(fieldSymbol.ConstantValue);
+            if (specialSyntax != null)
+            {
+                return specialSyntax;
+            }
+        }
 
         if (node.Name is IdentifierNameSyntax identifierName)
         {
@@ -95,6 +107,13 @@ public sealed class FullyQualifiedWithGlobalPrefixRewriter(SemanticModel semanti
 
     private static SyntaxNode Literal(object? constantValue)
     {
+        // Check for special floating-point values first
+        var specialFloatSyntax = SpecialFloatingPointValuesHelper.TryCreateSpecialFloatingPointSyntax(constantValue);
+        if (specialFloatSyntax != null)
+        {
+            return specialFloatSyntax;
+        }
+
         return constantValue switch
         {
             null => SyntaxFactory.LiteralExpression(SyntaxKind.NullLiteralExpression),
@@ -103,22 +122,16 @@ public sealed class FullyQualifiedWithGlobalPrefixRewriter(SemanticModel semanti
             bool boolValue => boolValue ? SyntaxFactory.LiteralExpression(SyntaxKind.TrueLiteralExpression)
                 : SyntaxFactory.LiteralExpression(SyntaxKind.FalseLiteralExpression),
             int intValue => SyntaxFactory.LiteralExpression(SyntaxKind.NumericLiteralExpression, SyntaxFactory.Literal(intValue)),
-            double and Double.NaN => SyntaxFactory.LiteralExpression(SyntaxKind.NumericLiteralExpression, SyntaxFactory.Literal("double.NaN", double.NaN)),
-            double doubleValue when double.IsPositiveInfinity(doubleValue) => SyntaxFactory.LiteralExpression(SyntaxKind.NumericLiteralExpression, SyntaxFactory.Literal("double.PositiveInfinity", double.PositiveInfinity)),
-            double doubleValue when double.IsNegativeInfinity(doubleValue) => SyntaxFactory.LiteralExpression(SyntaxKind.NumericLiteralExpression, SyntaxFactory.Literal("double.NegativeInfinity", double.NegativeInfinity)),
-            double doubleValue => SyntaxFactory.LiteralExpression(SyntaxKind.NumericLiteralExpression, SyntaxFactory.Literal(doubleValue)),
-            float and Single.NaN => SyntaxFactory.LiteralExpression(SyntaxKind.NumericLiteralExpression, SyntaxFactory.Literal("float.NaN", float.NaN)),
-            float floatValue when float.IsPositiveInfinity(floatValue) => SyntaxFactory.LiteralExpression(SyntaxKind.NumericLiteralExpression, SyntaxFactory.Literal("float.PositiveInfinity", float.PositiveInfinity)),
-            float floatValue when float.IsNegativeInfinity(floatValue) => SyntaxFactory.LiteralExpression(SyntaxKind.NumericLiteralExpression, SyntaxFactory.Literal("float.NegativeInfinity", float.NegativeInfinity)),
-            float floatValue => SyntaxFactory.LiteralExpression(SyntaxKind.NumericLiteralExpression, SyntaxFactory.Literal(floatValue)),
+            double doubleValue => SyntaxFactory.LiteralExpression(SyntaxKind.NumericLiteralExpression, SyntaxFactory.Literal(doubleValue.ToString("G17", CultureInfo.InvariantCulture) + "d", doubleValue)),
+            float floatValue => SyntaxFactory.LiteralExpression(SyntaxKind.NumericLiteralExpression, SyntaxFactory.Literal(floatValue.ToString("G9", CultureInfo.InvariantCulture) + "f", floatValue)),
             long longValue => SyntaxFactory.LiteralExpression(SyntaxKind.NumericLiteralExpression, SyntaxFactory.Literal(longValue)),
-            decimal decimalValue => SyntaxFactory.LiteralExpression(SyntaxKind.NumericLiteralExpression, SyntaxFactory.Literal(decimalValue)),
-            uint uintValue => SyntaxFactory.LiteralExpression(SyntaxKind.NumericLiteralExpression, SyntaxFactory.Literal(uintValue)),
-            ulong ulongValue => SyntaxFactory.LiteralExpression(SyntaxKind.NumericLiteralExpression, SyntaxFactory.Literal(ulongValue)),
-            ushort ushortValue => SyntaxFactory.LiteralExpression(SyntaxKind.NumericLiteralExpression, SyntaxFactory.Literal(ushortValue)),
-            byte byteValue => SyntaxFactory.LiteralExpression(SyntaxKind.NumericLiteralExpression, SyntaxFactory.Literal(byteValue)),
-            sbyte sbyteValue => SyntaxFactory.LiteralExpression(SyntaxKind.NumericLiteralExpression, SyntaxFactory.Literal(sbyteValue)),
-            short shortValue => SyntaxFactory.LiteralExpression(SyntaxKind.NumericLiteralExpression, SyntaxFactory.Literal(shortValue)),
+            decimal decimalValue => SyntaxFactory.LiteralExpression(SyntaxKind.NumericLiteralExpression, SyntaxFactory.Literal(decimalValue.ToString("G29", CultureInfo.InvariantCulture) + "m", decimalValue)),
+            uint uintValue => SyntaxFactory.LiteralExpression(SyntaxKind.NumericLiteralExpression, SyntaxFactory.Literal(uintValue + "U", uintValue)),
+            ulong ulongValue => SyntaxFactory.LiteralExpression(SyntaxKind.NumericLiteralExpression, SyntaxFactory.Literal(ulongValue + "UL", ulongValue)),
+            ushort ushortValue => SyntaxFactory.CastExpression(SyntaxFactory.ParseTypeName("ushort"), SyntaxFactory.LiteralExpression(SyntaxKind.NumericLiteralExpression, SyntaxFactory.Literal(ushortValue))),
+            byte byteValue => SyntaxFactory.CastExpression(SyntaxFactory.ParseTypeName("byte"), SyntaxFactory.LiteralExpression(SyntaxKind.NumericLiteralExpression, SyntaxFactory.Literal(byteValue))),
+            sbyte sbyteValue => SyntaxFactory.CastExpression(SyntaxFactory.ParseTypeName("sbyte"), SyntaxFactory.LiteralExpression(SyntaxKind.NumericLiteralExpression, SyntaxFactory.Literal(sbyteValue))),
+            short shortValue => SyntaxFactory.CastExpression(SyntaxFactory.ParseTypeName("short"), SyntaxFactory.LiteralExpression(SyntaxKind.NumericLiteralExpression, SyntaxFactory.Literal(shortValue))),
             _ => throw new ArgumentOutOfRangeException(nameof(constantValue), constantValue, $"Unknown constant type: {constantValue?.GetType()}")
         };
     }
@@ -127,10 +140,17 @@ public sealed class FullyQualifiedWithGlobalPrefixRewriter(SemanticModel semanti
     {
         var symbol = node.Type.GetSymbolInfo(semanticModel);
 
+        // If symbol is null (e.g., type doesn't exist), fall back to base implementation
+        // to let the compiler report the error rather than crashing the generator
+        if (symbol is null)
+        {
+            return base.VisitTypeOfExpression(node) ?? node;
+        }
+
         return SyntaxFactory
             .TypeOfExpression(
                 SyntaxFactory.ParseTypeName(
-                    symbol!.GloballyQualified())
+                    symbol.GloballyQualified())
             )
             .WithoutTrivia();
     }
@@ -146,6 +166,18 @@ public sealed class FullyQualifiedWithGlobalPrefixRewriter(SemanticModel semanti
         {
             // nameof() syntax
             var argumentList = (ArgumentListSyntax) childNodes[1];
+
+            // Check if there are any arguments before accessing
+            if (argumentList.Arguments.Count == 0)
+            {
+                // Invalid nameof() with no arguments - return empty string literal
+                // This prevents IndexOutOfRangeException and allows the compiler to report the error
+                return SyntaxFactory.LiteralExpression(
+                    SyntaxKind.StringLiteralExpression,
+                    SyntaxFactory.Literal(string.Empty)
+                );
+            }
+
             var argumentExpression = argumentList.Arguments[0].Expression;
 
             if (argumentExpression is IdentifierNameSyntax identifierNameSyntax)
@@ -176,19 +208,77 @@ public sealed class FullyQualifiedWithGlobalPrefixRewriter(SemanticModel semanti
 #if ROSLYN4_7_OR_GREATER
     public override SyntaxNode? VisitCollectionExpression(CollectionExpressionSyntax node)
     {
-        // For collection expressions, visit each element and ensure proper type conversion
-        var rewrittenElements = node.Elements.Select(element =>
+        // Convert collection expressions to array initializers for property assignments
+        // Collection expressions like [1, 2, 3] need to be converted to new object[] { 1, 2, 3 }
+        // when used in property initializers to avoid compilation errors
+
+        // Get the type info from the semantic model if available
+        var typeInfo = semanticModel.GetTypeInfo(node);
+        var elementType = "object";
+
+        if (typeInfo.ConvertedType is IArrayTypeSymbol arrayTypeSymbol)
+        {
+            elementType = arrayTypeSymbol.ElementType.GloballyQualified();
+        }
+        else if (typeInfo.Type is IArrayTypeSymbol arrayTypeSymbol2)
+        {
+            elementType = arrayTypeSymbol2.ElementType.GloballyQualified();
+        }
+        // Check parent cast expression for array type context
+        // Handles cases like: (MyEnum[])[MyEnum.One, MyEnum.Two]
+        else if (node.Parent is CastExpressionSyntax castExpr)
+        {
+            var castTypeInfo = semanticModel.GetTypeInfo(castExpr.Type);
+            if (castTypeInfo.Type is IArrayTypeSymbol castArrayType)
+            {
+                elementType = castArrayType.ElementType.GloballyQualified();
+            }
+        }
+        // Infer element type from first element if still unknown
+        // Handles cases where semantic model doesn't provide array type info
+        else if (node.Elements.Count > 0 && node.Elements[0] is ExpressionElementSyntax firstElement)
+        {
+            var elementTypeInfo = semanticModel.GetTypeInfo(firstElement.Expression);
+            if (elementTypeInfo.Type is ITypeSymbol inferredType)
+            {
+                elementType = inferredType.GloballyQualified();
+            }
+        }
+
+        // Visit and rewrite each element
+        var rewrittenElements = new List<ExpressionSyntax>();
+        foreach (var element in node.Elements)
         {
             if (element is ExpressionElementSyntax expressionElement)
             {
                 var rewrittenExpression = Visit(expressionElement.Expression);
-                return SyntaxFactory.ExpressionElement((ExpressionSyntax)rewrittenExpression);
+                rewrittenElements.Add((ExpressionSyntax)rewrittenExpression);
             }
-            return element;
-        }).ToList();
+        }
 
-        return SyntaxFactory.CollectionExpression(
+        // Create an array creation expression instead of a collection expression
+        // This ensures compatibility with property initializers
+        var arrayTypeSyntax = SyntaxFactory.ArrayType(
+            SyntaxFactory.ParseTypeName(elementType),
+            SyntaxFactory.SingletonList(
+                SyntaxFactory.ArrayRankSpecifier(
+                    SyntaxFactory.SingletonSeparatedList<ExpressionSyntax>(
+                        SyntaxFactory.OmittedArraySizeExpression()
+                    )
+                )
+            )
+        );
+
+        var initializer = SyntaxFactory.InitializerExpression(
+            SyntaxKind.ArrayInitializerExpression,
             SyntaxFactory.SeparatedList(rewrittenElements)
+        );
+
+        // Create the array creation expression with proper spacing
+        return SyntaxFactory.ArrayCreationExpression(
+            SyntaxFactory.Token(SyntaxKind.NewKeyword).WithTrailingTrivia(SyntaxFactory.Whitespace(" ")),
+            arrayTypeSyntax,
+            initializer
         );
     }
 #endif

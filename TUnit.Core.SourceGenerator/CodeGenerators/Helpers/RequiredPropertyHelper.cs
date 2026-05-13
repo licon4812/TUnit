@@ -27,37 +27,6 @@ public static class RequiredPropertyHelper
     }
 
     /// <summary>
-    /// Gets required properties that have data source attributes
-    /// </summary>
-    public static IEnumerable<IPropertySymbol> GetRequiredPropertiesWithDataSource(ITypeSymbol typeSymbol)
-    {
-        return GetAllRequiredProperties(typeSymbol)
-            .Where(p => HasDataSourceAttribute(p));
-    }
-
-    /// <summary>
-    /// Gets required properties that don't have data source attributes
-    /// </summary>
-    public static IEnumerable<IPropertySymbol> GetRequiredPropertiesWithoutDataSource(ITypeSymbol typeSymbol)
-    {
-        return GetAllRequiredProperties(typeSymbol)
-            .Where(p => !HasDataSourceAttribute(p));
-    }
-
-    private static bool HasDataSourceAttribute(IPropertySymbol property)
-    {
-        return property.GetAttributes().Any(attr =>
-        {
-            var attrName = attr.AttributeClass?.Name ?? "";
-            return attrName.EndsWith("DataSourceAttribute") || 
-                   attrName == "ClassDataSource" ||
-                   attrName == "MethodDataSource" ||
-                   attrName == "ArgumentsAttribute" ||
-                   attrName == "DataSourceForAttribute";
-        });
-    }
-
-    /// <summary>
     /// Generates a default value expression for a type
     /// </summary>
     public static string GetDefaultValueForType(ITypeSymbol type)

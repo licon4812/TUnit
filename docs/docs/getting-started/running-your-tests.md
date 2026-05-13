@@ -1,10 +1,10 @@
 # Running your tests
 
-As TUnit is built on-top of the newer Microsoft.Testing.Platform, and combined with the fact that TUnit tests are source generated, running your tests is available in a variety of ways. 
+As TUnit is built on-top of the newer Microsoft.Testing.Platform, and combined with the fact that TUnit tests are source generated, running your tests is available in a variety of ways.
 
 :::info
 
-Please note that for the coverage and trx report, you need to install [additional extensions](../extensions/extensions.md)
+Coverage and TRX reporting are built in. See [Extensions](../extending/built-in-extensions.md) for usage flags.
 
 :::
 
@@ -53,7 +53,7 @@ dotnet YourTestProject.dll --report-trx --coverage
 ## Published Test Project
 
 When you publish your test project, you'll be given an executable.
-On windows this'll be a `.exe` and on Linux/MacOS there'll be no extension.
+On Windows this will be a `.exe` and on Linux/macOS there will be no extension.
 
 This can be invoked directly and passed any flags.
 
@@ -64,7 +64,7 @@ cd 'C:/Your/Test/Directory/bin/Release/net8.0/win-x64/publish'
 ./YourTestProject.exe --report-trx --coverage
 ```
 
-# IDE Support
+## IDE Support
 
 ## Visual Studio
 Visual Studio is supported. The "Use testing platform server mode" option must be selected in Tools > Manage Preview Features.
@@ -72,9 +72,9 @@ Visual Studio is supported. The "Use testing platform server mode" option must b
 ![Visual Studio Settings](../../static/img/visual-studio.png)
 
 ## Rider
-Rider is supported. 
+Rider is supported.
 
-The [Enable Testing Platform support](https://www.jetbrains.com/help/rider/Reference__Options__Tools__Unit_Testing__VSTest.html) option must be selected in Settings > Build, Execution, Deployment > Unit Testing > VSTest.
+The Enable Testing Platform support option must be selected in Settings > Build, Execution, Deployment > Unit Testing > Testing Platform.
 
 ![Rider Settings](../../static/img/rider.png)
 
@@ -86,4 +86,28 @@ Visual Studio Code is supported.
 - Enable Dotnet > Test Window > Use Testing Platform Protocol
 
 ![Visual Studio Code Settings](../../static/img/visual-studio-code.png)
+
+## What's Next?
+
+You've successfully learned the basics of TUnit! You can now:
+- Write tests with the `[Test]` attribute
+- Run them via command line or your IDE
+- See your test results
+
+To continue your journey with TUnit, explore these topics:
+
+**Core Testing Concepts:**
+- **[Assertions](../assertions/getting-started.md)** - Learn TUnit's fluent assertion syntax
+- **[Test Lifecycle](../writing-tests/lifecycle.md)** - Understand the test execution lifecycle
+- **[Data-Driven Testing](../writing-tests/arguments.md)** - Run tests with multiple input values
+
+**Common Tasks:**
+- **[Mocking](../writing-tests/mocking/index.md)** - Use mocks and fakes in your tests
+- **[Tips & Pitfalls](../guides/best-practices.md)** - TUnit-specific tips to avoid common mistakes
+
+**Advanced Features:**
+- **[Parallelism](../execution/parallelism.md)** - Control how tests run in parallel
+- **[CI/CD Integration](../execution/ci-cd-reporting.md)** - Integrate TUnit into your pipeline
+
+Need help? Check the [Troubleshooting & FAQ](../troubleshooting.md) guide.
 

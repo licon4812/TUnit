@@ -1,6 +1,6 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
-  <Import Project="..\Polyfill.props" />
+  <Import Project="..\Polyfill.targets" />
 
   <PropertyGroup>
     <TargetFrameworks>netstandard2.0</TargetFrameworks>
@@ -23,6 +23,10 @@
     </PackageReference>
     <PackageReference Include="Microsoft.CodeAnalysis.Common" />
     <PackageReference Include="Microsoft.CodeAnalysis.CSharp" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="..\TUnit.Core.SourceGenerator\Extensions\ParsableTypeExtensions.cs" Link="Extensions\ParsableTypeExtensions.cs" />
   </ItemGroup>
 
   <ItemGroup>

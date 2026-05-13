@@ -1,27 +1,36 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
 <Project>
 
-    <PropertyGroup>
-        <XunitPackageReferenceFound>false</XunitPackageReferenceFound>
+    <PropertyGroup Condition="'$(TUnitImplicitUsings)' == ''">
+        <TUnitImplicitUsings>true</TUnitImplicitUsings>
     </PropertyGroup>
 
-    <Target Name="SetXunitPackageReferenceFound" BeforeTargets="PrepareForBuild">
-        <!-- Filter PackageReference for xunit and xunit.v3 -->
+    <Target Name="DetectPolyfillReference" BeforeTargets="PrepareForBuild">
+        <!-- Check if Polyfill is already defined by user (via PackageReference or PackageVersion for CPM) -->
         <ItemGroup>
-            <_XunitReference Include="@(PackageReference)"
-                Condition="'%(PackageReference.Identity)' == 'xunit' Or '%(PackageReference.Identity)' == 'xunit.v3'" />
+            <_PolyfillPackageReference Include="@(PackageReference)"
+                Condition="'%(PackageReference.Identity)' == 'Polyfill'" />
+            <_PolyfillPackageVersion Include="@(PackageVersion)"
+                Condition="'%(PackageVersion.Identity)' == 'Polyfill'" />
         </ItemGroup>
         <PropertyGroup>
-            <XunitPackageReferenceFound Condition="'@(_XunitReference)' != ''">true</XunitPackageReferenceFound>
+            <_PolyfillAlreadyDefined Condition="'@(_PolyfillPackageReference)' != '' Or '@(_PolyfillPackageVersion)' != ''">true</_PolyfillAlreadyDefined>
         </PropertyGroup>
     </Target>
 
-    <PropertyGroup Condition="'$(XunitPackageReferenceFound)' == 'false'">
-        <TUnitImplicitUsings>true</TUnitImplicitUsings>
+    <PropertyGroup>
+        <EnableTUnitPolyfills Condition="'$(EnableTUnitPolyfills)' == '' and ('$(TargetFramework)' == 'netstandard2.0' or '$(TargetFramework)' == 'netstandard2.1' or '$(TargetFrameworkIdentifier)' == '.NETFramework')">true</EnableTUnitPolyfills>
+        <PolyUseEmbeddedAttribute Condition="'$(PolyUseEmbeddedAttribute)' == ''">true</PolyUseEmbeddedAttribute>
+    </PropertyGroup>
+
+    <PropertyGroup>
+        <!-- Enable TUnit source generation (defaults to true). Set to false when using reflection mode to skip source generation and improve build performance. -->
+        <EnableTUnitSourceGeneration Condition="'$(EnableTUnitSourceGeneration)' == ''">true</EnableTUnitSourceGeneration>
     </PropertyGroup>
 
     <ItemGroup>
         <CompilerVisibleProperty Include="EnableTUnitPolyfills" />
+        <CompilerVisibleProperty Include="EnableTUnitSourceGeneration" />
     </ItemGroup>
 
 </Project>

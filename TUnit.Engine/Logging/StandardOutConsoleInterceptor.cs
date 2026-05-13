@@ -1,7 +1,5 @@
-﻿using TUnit.Core;
-using TUnit.Engine.Services;
-
-#pragma warning disable CS8765 // Nullability of type of parameter doesn't match overridden member (possibly because of nullability attributes).
+using TUnit.Core;
+using TUnit.Core.Logging;
 
 namespace TUnit.Engine.Logging;
 
@@ -11,14 +9,19 @@ internal class StandardOutConsoleInterceptor : OptimizedConsoleInterceptor
 
     public static TextWriter DefaultOut { get; }
 
-    protected override TextWriter RedirectedOut => Context.Current.OutputWriter;
+    protected override LogLevel SinkLogLevel => LogLevel.Information;
+
+    protected override ConsoleLineBuffer GetLineBuffer() => Context.Current.ConsoleStdOutLineBuffer;
 
     static StandardOutConsoleInterceptor()
     {
-        DefaultOut = Console.Out;
+        DefaultOut = new StreamWriter(Console.OpenStandardOutput())
+        {
+            AutoFlush = true
+        };
     }
 
-    public StandardOutConsoleInterceptor(VerbosityService verbosityService) : base(verbosityService)
+    public StandardOutConsoleInterceptor()
     {
         Instance = this;
     }
@@ -28,13 +31,7 @@ internal class StandardOutConsoleInterceptor : OptimizedConsoleInterceptor
         Console.SetOut(this);
     }
 
-    protected private override TextWriter GetOriginalOut()
-    {
-        return DefaultOut;
-    }
+    private protected override TextWriter GetOriginalOut() => DefaultOut;
 
-    protected private override void ResetDefault()
-    {
-        Console.SetOut(DefaultOut);
-    }
+    private protected override void ResetDefault() => Console.SetOut(DefaultOut);
 }

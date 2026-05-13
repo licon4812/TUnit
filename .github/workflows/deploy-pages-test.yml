@@ -4,6 +4,13 @@ on:
   pull_request:
     branches:
       - main
+    paths:
+      - 'docs/**'
+      - '.github/workflows/deploy-pages-test.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
 
 jobs:
   test-deploy:
@@ -13,12 +20,12 @@ jobs:
       run:
         working-directory: docs
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
-          node-version: 18
+          node-version: 24
           cache: yarn
           cache-dependency-path: 'docs/yarn.lock'
 
@@ -26,3 +33,21 @@ jobs:
         run: yarn install --frozen-lockfile
       - name: Test build website
         run: yarn build
+
+      - name: Restore lychee cache
+        uses: actions/cache@v5
+        with:
+          path: .lycheecache
+          key: lychee-html-${{ hashFiles('docs/docs/**/*.md', 'docs/docs/**/*.mdx', 'docs/lychee.toml') }}
+          restore-keys: lychee-html-
+
+      - name: Check links in built HTML
+        uses: lycheeverse/lychee-action@v2
+        with:
+          args: >-
+            --config ./docs/lychee.toml
+            --base-url https://tunit.dev
+            --no-progress
+            'docs/build/**/*.html'
+          fail: true
+          workingDirectory: ${{ github.workspace }}

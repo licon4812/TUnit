@@ -1,0 +1,290 @@
+using TUnit.Mocks.Arguments;
+using TUnit.Mocks.Exceptions;
+using TUnit.Mocks.Verification;
+
+namespace TUnit.Mocks.Tests;
+
+/// <summary>
+/// Interfaces for MockRepository testing.
+/// </summary>
+public interface IRepoService
+{
+    string GetData(int id);
+    void Save(string data);
+}
+
+public interface IRepoLogger
+{
+    void Log(string message);
+    string LastEntry { get; }
+}
+
+/// <summary>
+/// US14 Tests: Mock Repository &amp; Batch Operations.
+/// </summary>
+public class MockRepositoryTests
+{
+    [Test]
+    public async Task Repository_Creates_And_Tracks_Mocks()
+    {
+        // Arrange
+        var repo = new MockRepository();
+
+        // Act
+        var serviceMock = repo.Of<IRepoService>();
+        var loggerMock = repo.Of<IRepoLogger>();
+
+        // Assert
+        await Assert.That(repo.Mocks).Count().IsEqualTo(2);
+        await Assert.That(serviceMock.Object).IsNotNull();
+        await Assert.That(loggerMock.Object).IsNotNull();
+    }
+
+    [Test]
+    public async Task Repository_VerifyAll_Passes_When_All_Setups_Invoked()
+    {
+        // Arrange
+        var repo = new MockRepository();
+        var serviceMock = repo.Of<IRepoService>();
+        var loggerMock = repo.Of<IRepoLogger>();
+
+        serviceMock.GetData(Any()).Returns("result");
+        loggerMock.Log(Any());
+
+        // Act — invoke all setups
+        serviceMock.Object.GetData(1);
+        loggerMock.Object.Log("hello");
+
+        // Assert — VerifyAll should not throw
+        repo.VerifyAll();
+    }
+
+    [Test]
+    public async Task Repository_VerifyAll_Throws_When_Setup_Not_Invoked()
+    {
+        // Arrange
+        var repo = new MockRepository();
+        var serviceMock = repo.Of<IRepoService>();
+        var loggerMock = repo.Of<IRepoLogger>();
+
+        serviceMock.GetData(Any()).Returns("result");
+        loggerMock.Log(Any());
+
+        // Act — only invoke one mock's setup
+        serviceMock.Object.GetData(1);
+        // loggerMock.Object.Log("hello") is NOT called
+
+        // Assert — VerifyAll should throw AggregateException wrapping MockVerificationException
+        var ex = Assert.Throws<AggregateException>(() => repo.VerifyAll());
+        await Assert.That(ex.InnerExceptions).HasSingleItem();
+        await Assert.That(ex.InnerExceptions[0]).IsTypeOf<MockVerificationException>();
+    }
+
+    [Test]
+    public async Task Repository_VerifyNoOtherCalls_Passes_When_All_Verified()
+    {
+        // Arrange
+        var repo = new MockRepository();
+        var serviceMock = repo.Of<IRepoService>();
+        var loggerMock = repo.Of<IRepoLogger>();
+
+        // Act
+        serviceMock.Object.GetData(1);
+        loggerMock.Object.Log("hello");
+
+        // Verify each call
+        serviceMock.GetData(Is(1)).WasCalled();
+        loggerMock.Log(Is("hello")).WasCalled();
+
+        // Assert — no unverified calls
+        repo.VerifyNoOtherCalls();
+    }
+
+    [Test]
+    public async Task Repository_VerifyNoOtherCalls_Throws_When_Unverified_Calls_Exist()
+    {
+        // Arrange
+        var repo = new MockRepository();
+        var serviceMock = repo.Of<IRepoService>();
+        var loggerMock = repo.Of<IRepoLogger>();
+
+        // Act
+        serviceMock.Object.GetData(1);
+        loggerMock.Object.Log("hello");
+
+        // Only verify one mock
+        serviceMock.GetData(Is(1)).WasCalled();
+
+        // Assert — loggerMock has unverified calls
+        var ex = Assert.Throws<AggregateException>(() => repo.VerifyNoOtherCalls());
+        await Assert.That(ex.InnerExceptions).HasSingleItem();
+        await Assert.That(ex.InnerExceptions[0]).IsTypeOf<MockVerificationException>();
+    }
+
+    [Test]
+    public async Task Repository_Reset_Clears_All_Mocks()
+    {
+        // Arrange
+        var repo = new MockRepository();
+        var serviceMock = repo.Of<IRepoService>();
+        var loggerMock = repo.Of<IRepoLogger>();
+
+        serviceMock.GetData(Any()).Returns("configured");
+        loggerMock.Object.Log("call before reset");
+
+        // Act
+        repo.Reset();
+
+        // Assert — setups and history are cleared
+        await Assert.That(serviceMock.Object.GetData(1)).IsEmpty(); // no setup, returns smart default
+        await Assert.That(Mock.Invocations(serviceMock)).Count().IsEqualTo(1); // only the new call
+        await Assert.That(Mock.Invocations(loggerMock)).Count().IsEqualTo(0); // history cleared
+    }
+
+    [Test]
+    public async Task Repository_Uses_Default_Behavior()
+    {
+        // Arrange — create repository with strict behavior
+        var repo = new MockRepository(MockBehavior.Strict);
+        var mock = repo.Of<IRepoService>();
+
+        // Assert — mock inherits strict behavior
+        await Assert.That(Mock.Behavior(mock)).IsEqualTo(MockBehavior.Strict);
+    }
+
+    [Test]
+    public async Task Repository_Behavior_Can_Be_Overridden_Per_Mock()
+    {
+        // Arrange — strict repository, loose individual mock
+        var repo = new MockRepository(MockBehavior.Strict);
+        var looseMock = repo.Of<IRepoService>(MockBehavior.Loose);
+
+        // Assert — specific behavior overrides repository default
+        await Assert.That(Mock.Behavior(looseMock)).IsEqualTo(MockBehavior.Loose);
+    }
+
+    [Test]
+    public async Task Repository_Track_Adds_Existing_Mock()
+    {
+        // Arrange
+        var repo = new MockRepository();
+        var externalMock = IRepoService.Mock();
+
+        // Act — track an externally-created mock
+        repo.Track(externalMock);
+
+        // Assert
+        await Assert.That(repo.Mocks).Count().IsEqualTo(1);
+    }
+
+    [Test]
+    public async Task Repository_VerifyAll_On_Empty_Repository_Does_Not_Throw()
+    {
+        // Arrange
+        var repo = new MockRepository();
+
+        // Assert — no mocks tracked, nothing to verify
+        repo.VerifyAll();
+        repo.VerifyNoOtherCalls();
+        repo.Reset();
+    }
+
+    [Test]
+    public async Task Repository_Of_ClassMock_Creates_And_Tracks_Partial_Mock()
+    {
+        // Arrange
+        var repo = new MockRepository();
+
+        // Act
+        var mock = repo.Of<ConcreteService>();
+
+        // Assert — tracked
+        await Assert.That(repo.Mocks).Count().IsEqualTo(1);
+        await Assert.That(mock.Object).IsNotNull();
+    }
+
+    [Test]
+    public async Task Repository_Of_ClassMock_Base_Method_Works()
+    {
+        // Arrange
+        var repo = new MockRepository();
+        var mock = repo.Of<ConcreteService>();
+
+        // Act — unconfigured, calls base implementation
+        var result = mock.Object.Add(3, 4);
+
+        // Assert
+        await Assert.That(result).IsEqualTo(7);
+    }
+
+    [Test]
+    public async Task Repository_Of_ClassMock_Configured_Method_Returns_Mock_Value()
+    {
+        // Arrange
+        var repo = new MockRepository();
+        var mock = repo.Of<ConcreteService>();
+        mock.Greet(Any()).Returns("Mocked!");
+
+        // Act
+        var result = mock.Object.Greet("World");
+
+        // Assert
+        await Assert.That(result).IsEqualTo("Mocked!");
+    }
+
+    [Test]
+    public async Task Repository_Of_ClassMock_With_Constructor_Args()
+    {
+        // Arrange
+        var repo = new MockRepository();
+        var mock = repo.Of<ServiceWithConstructor>("PREFIX");
+        mock.Format(Any()).Returns("formatted");
+
+        // Act — GetPrefix is virtual, unconfigured → calls base
+        var prefix = mock.Object.GetPrefix();
+
+        // Assert
+        await Assert.That(prefix).IsEqualTo("PREFIX");
+    }
+
+    [Test]
+    public async Task Repository_Of_ClassMock_VerifyAll_Includes_Partial_Mocks()
+    {
+        // Arrange
+        var repo = new MockRepository();
+        var serviceMock = repo.Of<IRepoService>();
+        var partialMock = repo.Of<ConcreteService>();
+
+        serviceMock.GetData(Any()).Returns("data");
+        partialMock.Greet(Any()).Returns("Hi");
+
+        // Act — invoke both setups
+        serviceMock.Object.GetData(1);
+        partialMock.Object.Greet("Alice");
+
+        // Assert — VerifyAll covers both interface mocks and partial mocks
+        repo.VerifyAll();
+    }
+
+    [Test]
+    public async Task Repository_Of_ClassMock_With_Strict_Behavior()
+    {
+        // Arrange
+        var repo = new MockRepository(MockBehavior.Strict);
+        var mock = repo.Of<ConcreteService>();
+
+        // Assert — partial mock inherits strict behavior from repository
+        await Assert.That(Mock.Behavior(mock)).IsEqualTo(MockBehavior.Strict);
+    }
+
+    [Test]
+    public async Task Repository_Of_ClassMock_Behavior_Override()
+    {
+        // Arrange — strict repository, loose partial mock
+        var repo = new MockRepository(MockBehavior.Strict);
+        var mock = repo.Of<ConcreteService>(MockBehavior.Loose);
+
+        // Assert — behavior overridden
+        await Assert.That(Mock.Behavior(mock)).IsEqualTo(MockBehavior.Loose);
+    }
+}

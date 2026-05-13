@@ -42,12 +42,12 @@ public static partial class CSharpCodeFixVerifier<TAnalyzer, TCodeFix>
             TestCode = source.NormalizeLineEndings(),
             CodeActionValidationMode = CodeActionValidationMode.SemanticStructure,
             ReferenceAssemblies = ReferenceAssemblies.Net.Net90
-                .AddPackages([new PackageIdentity("xunit.v3.extensibility.core", "2.0.0")]),
+                .AddPackages([new PackageIdentity("xunit.v3.extensibility.core", "3.0.1")]),
             TestState =
             {
                 AdditionalReferences =
                 {
-                    typeof(TUnitAttribute).Assembly.Location,
+                    TUnit.Tests.Shared.AnalyzerTestCompatibility.GetCompatibleDllPath("TUnit.Core", typeof(TUnitAttribute).Assembly),
                 },
             }
         };
@@ -97,7 +97,7 @@ public static partial class CSharpCodeFixVerifier<TAnalyzer, TCodeFix>
             {
                 AdditionalReferences =
                 {
-                    typeof(TUnitAttribute).Assembly.Location,
+                    TUnit.Tests.Shared.AnalyzerTestCompatibility.GetCompatibleDllPath("TUnit.Core", typeof(TUnitAttribute).Assembly),
                 },
             },
             CodeActionValidationMode = CodeActionValidationMode.SemanticStructure,

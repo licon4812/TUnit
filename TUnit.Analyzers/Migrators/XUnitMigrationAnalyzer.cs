@@ -80,7 +80,7 @@ public class XUnitMigrationAnalyzer : ConcurrentDiagnosticAnalyzer
 
             var members = namedTypeSymbol.GetMembers();
 
-            ITypeSymbol[] types = members.OfType<IPropertySymbol>().Where(x => x.Type.ContainingNamespace?.Name.StartsWith("Xunit") is true).Select(x => x.Type)
+            var types = members.OfType<IPropertySymbol>().Where(x => x.Type.ContainingNamespace?.Name.StartsWith("Xunit") is true).Select(x => x.Type)
                 .Concat(members.OfType<IMethodSymbol>().Where(x => x.ReturnType.ContainingNamespace?.Name.StartsWith("Xunit") is true).Select(x => x.ReturnType))
                 .Concat(members.OfType<IFieldSymbol>().Where(x => x.Type.ContainingNamespace?.Name.StartsWith("Xunit") is true).Select(x => x.Type))
                 .ToArray();
@@ -90,6 +90,28 @@ public class XUnitMigrationAnalyzer : ConcurrentDiagnosticAnalyzer
                 Flag(context);
                 return;
             }
+        }
+
+        // Check for global usings at the compilation unit level
+        // This handles files like GlobalUsings.cs that have no classes
+        foreach (var usingDirective in compilationUnitSyntax.Usings)
+        {
+            if (!usingDirective.GlobalKeyword.IsKind(SyntaxKind.GlobalKeyword)
+                || usingDirective.Name is not (
+                    QualifiedNameSyntax
+                    {
+                        Left: IdentifierNameSyntax {Identifier.Text: "Xunit"}
+                    }
+                    or IdentifierNameSyntax
+                    {
+                        Identifier.Text: "Xunit"
+                    }))
+            {
+                continue;
+            }
+
+            context.ReportDiagnostic(Diagnostic.Create(Rules.XunitMigration, usingDirective.GetLocation()));
+            return;
         }
     }
 

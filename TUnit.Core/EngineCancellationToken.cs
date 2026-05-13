@@ -1,4 +1,6 @@
-﻿namespace TUnit.Core;
+﻿using TUnit.Core.Settings;
+
+namespace TUnit.Core;
 
 /// <summary>
 /// Represents a cancellation token for the engine.
@@ -15,6 +17,8 @@ public class EngineCancellationToken : IDisposable
     /// </summary>
     public CancellationToken Token { get; private set; }
 
+    private volatile bool _forcefulExitStarted;
+
     /// <summary>
     /// Initializes the cancellation token with a linked token source.
     /// </summary>
@@ -24,19 +28,68 @@ public class EngineCancellationToken : IDisposable
         CancellationTokenSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         Token = CancellationTokenSource.Token;
 
-        Console.CancelKeyPress += (sender, e) =>
-        {
-            if (!CancellationTokenSource.IsCancellationRequested)
-            {
-                CancellationTokenSource.Cancel();
-            }
+        Token.Register(_ => Cancel(), this);
 
-            _ = Task.Delay(TimeSpan.FromSeconds(10)).ContinueWith(_ =>
+        // Console.CancelKeyPress is not supported on browser platforms
+#if NET5_0_OR_GREATER
+        if (!OperatingSystem.IsBrowser())
+        {
+#endif
+            Console.CancelKeyPress += OnCancelKeyPress;
+            AppDomain.CurrentDomain.ProcessExit += OnProcessExit;
+#if NET5_0_OR_GREATER
+        }
+#endif
+    }
+
+    private void OnCancelKeyPress(object? sender, ConsoleCancelEventArgs e)
+    {
+        Cancel();
+
+        // Prevent the default behavior (immediate termination)
+        e.Cancel = true;
+    }
+
+    private void Cancel()
+    {
+        // Cancel the test execution
+        if (!CancellationTokenSource.IsCancellationRequested)
+        {
+            CancellationTokenSource.Cancel();
+        }
+
+        // Only start the forceful exit timer once
+        if (!_forcefulExitStarted)
+        {
+            _forcefulExitStarted = true;
+
+            // Start a new forceful exit timer
+            _ = Task.Delay(TUnitSettings.Default.Timeouts.ForcefulExitTimeout, CancellationToken.None).ContinueWith(t =>
             {
-                Console.WriteLine("Forcefully terminating the process due to cancellation request.");
-                Environment.Exit(1);
-            });
-        };
+                if (!t.IsCanceled)
+                {
+                    Console.WriteLine("Forcefully terminating the process due to cancellation request.");
+                    Environment.Exit(1);
+                }
+            }, TaskScheduler.Default);
+        }
+    }
+
+    private void OnProcessExit(object? sender, EventArgs e)
+    {
+        // Process is exiting (SIGTERM, kill, etc.) - trigger cancellation to execute After hooks
+        // Note: ProcessExit runs on a background thread with limited time (~3 seconds on Windows)
+        // The After hooks registered via CancellationToken.Register() will execute when we cancel
+        if (!CancellationTokenSource.IsCancellationRequested)
+        {
+            CancellationTokenSource.Cancel();
+
+            // Give After hooks a brief moment to execute via registered callbacks.
+            // ProcessExit has limited time (~3s on Windows), so we can only wait briefly.
+            // Thread.Sleep is appropriate here: we're on a synchronous event handler thread
+            // and just need a simple delay — no need to involve the task scheduler.
+            Thread.Sleep(TUnitSettings.Default.Timeouts.ProcessExitHookDelay);
+        }
     }
 
     /// <summary>
@@ -44,6 +97,16 @@ public class EngineCancellationToken : IDisposable
     /// </summary>
     public void Dispose()
     {
+        // Console.CancelKeyPress is not supported on browser platforms
+#if NET5_0_OR_GREATER
+        if (!OperatingSystem.IsBrowser())
+        {
+#endif
+            Console.CancelKeyPress -= OnCancelKeyPress;
+            AppDomain.CurrentDomain.ProcessExit -= OnProcessExit;
+#if NET5_0_OR_GREATER
+        }
+#endif
         CancellationTokenSource.Dispose();
     }
 }

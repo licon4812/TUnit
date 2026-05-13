@@ -6,10 +6,13 @@
     <ItemGroup>
         <Content Include="TUnit.Assertions.FSharp.props" />
         <Compile Include="Extensions.fs" />
+        <Compile Include="TaskAssert.fs" />
     </ItemGroup>
 
     <ItemGroup>
       <ProjectReference Include="..\TUnit.Assertions\TUnit.Assertions.csproj" />
     </ItemGroup>
+
+  <Import Project="..\Library.targets" />
 
 </Project>

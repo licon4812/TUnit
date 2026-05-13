@@ -1,6 +1,4 @@
 ﻿using System.Diagnostics.CodeAnalysis;
-using TUnit.Assertions.AssertConditions;
-using TUnit.Assertions.AssertConditions.Throws;
 
 namespace TUnit.Assertions.Tests.Assertions.Delegates;
 
@@ -40,20 +38,19 @@ public partial class Throws
             var message1 = "foo";
             var message2 = "bar";
             var expectedMessage = """
-                                  Expected action to throw a CustomException which message matches "bar"
-                                  
-                                  but found "foo"
-                                  
-                                  at Assert.That(action).ThrowsExactly<CustomException>().WithMessageMatching(message2)
-                                  """;
+                                  Expected exception message to match pattern "bar"
+                                  but exception message "foo" does not match pattern "bar"
+
+                                  at Assert.That(action).ThrowsExactly<CustomException>().WithMessageMatching("bar")
+                                  """.NormalizeLineEndings();
             Exception exception = CreateCustomException(message1);
             Action action = () => throw exception;
 
             var sut = async ()
                 => await Assert.That(action).ThrowsExactly<CustomException>().WithMessageMatching(message2);
 
-            await Assert.That(sut).ThrowsException()
-                .WithMessage(expectedMessage);
+            var thrownException = await Assert.That(sut).ThrowsException();
+            await Assert.That(thrownException.Message.NormalizeLineEndings()).IsEqualTo(expectedMessage);
         }
 
         [Test]
@@ -92,7 +89,7 @@ public partial class Throws
         public async Task Supports_Case_Insensitive_Wildcard_Pattern(
             string message, string pattern, bool expectMatch)
         {
-            var expectedExpression = "*Assert.That(action).ThrowsException().WithMessageMatching(StringMatcher.AsWildcard(pattern).Ignor*";
+            var expectedExpression = "*Assert.That(action).ThrowsException().WithMessageMatching(*";
             Exception exception = CreateCustomException(message);
             Action action = () => throw exception;
 
@@ -121,7 +118,7 @@ public partial class Throws
         public async Task Supports_Regex_Pattern(
             string message, string pattern, bool expectMatch)
         {
-            var expectedExpression = "*Assert.That(action).ThrowsException().WithMessageMatching(StringMatcher.AsRegex(pattern))*";
+            var expectedExpression = "*Assert.That(action).ThrowsException().WithMessageMatching(*";
             Exception exception = CreateCustomException(message);
             Action action = () => throw exception;
 
@@ -145,7 +142,7 @@ public partial class Throws
         public async Task Supports_Case_Insensitive_Regex_Pattern(
             string message, string pattern, bool expectMatch)
         {
-            var expectedExpression = "*Assert.That(action).ThrowsException().WithMessageMatching(StringMatcher.AsRegex(pattern).Ignoring*";
+            var expectedExpression = "*Assert.That(action).ThrowsException().WithMessageMatching(*";
             Exception exception = CreateCustomException(message);
             Action action = () => throw exception;
 

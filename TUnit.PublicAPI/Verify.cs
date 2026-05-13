@@ -79,8 +79,8 @@ public sealed class VerifySettingsTask
     public async Task ToTask()
     {
         var testContext = TestContext.Current!;
-        var testClassName = testContext.TestDetails.MethodMetadata.Class.Name;
-        var testName = testContext.TestDetails.TestName;
+        var testClassName = testContext.Metadata.TestDetails.MethodMetadata.Class.Name;
+        var testName = testContext.Metadata.TestDetails.TestName;
         var name = $"{testClassName}.{testName}{_uniqueSuffix}";
         var dir = Sourcy.DotNet.Projects.TUnit_PublicAPI.DirectoryName!;
         _receivedPath = Path.Combine(dir, $"{name}.received.txt");
@@ -129,15 +129,15 @@ public sealed class VerifySettingsTask
 
         if (!File.Exists(_verifiedPath))
         {
-            await FilePolyfill.WriteAllTextAsync(_receivedPath, NormalizeNewline(final));
+            await File.WriteAllTextAsync(_receivedPath, NormalizeNewline(final));
             throw new InvalidOperationException($"No verified file found for '{name}'.");
         }
 
-        var approved = await FilePolyfill.ReadAllTextAsync(_verifiedPath);
+        var approved = await File.ReadAllTextAsync(_verifiedPath);
 
         if (!string.Equals(NormalizeNewline(final), NormalizeNewline(approved), StringComparison.Ordinal))
         {
-            await FilePolyfill.WriteAllTextAsync(_receivedPath, NormalizeNewline(final));
+            await File.WriteAllTextAsync(_receivedPath, NormalizeNewline(final));
 
             if (_onVerifyMismatch != null)
             {

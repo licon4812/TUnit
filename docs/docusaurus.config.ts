@@ -5,7 +5,7 @@ import type * as Preset from '@docusaurus/preset-classic';
 const config: Config = {
   title: 'TUnit',
   tagline: 'Welcome to TUnit Testing',
-  favicon: 'img/favicon.ico',
+  favicon: 'img/tunit-favicon.svg',
 
   // Set the production url of your site here
   url: 'https://tunit.dev',
@@ -21,7 +21,7 @@ const config: Config = {
   deploymentBranch: 'gh-pages',
 
   onBrokenLinks: 'throw',
-  onBrokenMarkdownLinks: 'warn',
+  onBrokenAnchors: 'throw',
 
   // Even if you don't use internationalization, you can use this field to set
   // useful metadata like html lang. For example, if your site is Chinese, you
@@ -31,12 +31,43 @@ const config: Config = {
     locales: ['en'],
   },
 
+  plugins: [
+    'docusaurus-plugin-llms',
+  ],
+
+  headTags: [
+    {
+      tagName: 'script',
+      attributes: {},
+      innerHTML: `window.tlumaConfig = {
+  source: "thomhurst/tunit",
+  theme: "auto",
+  brandColor: "blue",
+  button: "bottom-right",
+  welcomePulse: true,
+  edgePadding: "1rem",
+  autoOpen: false,
+  desktopFullscreenByDefault: false
+};`,
+    },
+  ],
+
+  scripts: [
+    {
+      src: 'https://tluma.ai/widget.js',
+      async: true,
+    },
+  ],
+
   presets: [
     [
       'classic',
       {
         docs: {
           sidebarPath: './sidebars.ts',
+          admonitions: {
+            keywords: ['performance', 'from-xunit', 'from-nunit', 'from-mstest'],
+          },
         },
         // blog: {
         //   showReadingTime: true,
@@ -51,6 +82,14 @@ const config: Config = {
       } satisfies Preset.Options,
     ],
   ],
+
+  markdown: {
+    mermaid: true,
+    hooks: {
+      onBrokenMarkdownLinks: 'throw',
+    },
+  },
+  themes: ['@docusaurus/theme-mermaid'],
 
   themeConfig: {
     // Replace with your project's social card
@@ -67,14 +106,14 @@ const config: Config = {
       title: 'TUnit',
       logo: {
         alt: 'TUnit Logo',
-        src: 'img/lab.svg',
+        src: 'img/tunit-favicon.svg',
       },
       items: [
         {
           type: 'docSidebar',
           sidebarId: 'docs',
           position: 'left',
-          label: 'Tutorial',
+          label: 'Docs',
         },
         {
           href: 'https://github.com/thomhurst/TUnit/issues',
@@ -97,6 +136,11 @@ const config: Config = {
           label: 'GitHub',
           position: 'right',
         },
+        {
+          href: 'https://github.com/sponsors/thomhurst',
+          label: '❤️ Sponsor',
+          position: 'right',
+        },
       ],
     },
     footer: {
@@ -106,7 +150,7 @@ const config: Config = {
           title: 'Docs',
           items: [
             {
-              label: 'Tutorial',
+              label: 'Docs',
               to: '/docs/intro',
             },
           ],

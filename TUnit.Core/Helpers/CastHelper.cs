@@ -1,398 +1,476 @@
-﻿using System.Collections;
+using System.Collections;
+using System.Collections.Concurrent;
 using System.Diagnostics.CodeAnalysis;
 using System.Reflection;
+using System.Runtime.CompilerServices;
 using TUnit.Core.Converters;
-using TUnit.Core.Interfaces.SourceGenerator;
 
 namespace TUnit.Core.Helpers;
 
 public static class CastHelper
 {
-    [UnconditionalSuppressMessage("Trimming", "IL2072", 
-        Justification = "Type conversion uses DynamicallyAccessedMembers for known conversion patterns. For AOT scenarios, use explicit type conversions.")]
-    [UnconditionalSuppressMessage("AOT", "IL3050", 
-        Justification = "Reflection-based conversion is a fallback for runtime scenarios. AOT applications should use explicit conversions.")]
-    public static T? Cast<[DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicMethods | DynamicallyAccessedMemberTypes.NonPublicMethods)] T>(object? value)
+    // Cache for conversion methods to avoid repeated reflection lookups
+    private static readonly ConcurrentDictionary<(Type Source, Type Target), MethodInfo?> ConversionMethodCache = new();
+
+    /// <summary>
+    /// Attempts to cast or convert a value to the specified type T.
+    /// Uses a layered approach: fast paths first (AOT-safe), then reflection fallbacks.
+    /// </summary>
+    [UnconditionalSuppressMessage("Trimming", "IL2087:'type' argument does not satisfy 'DynamicallyAccessedMembersAttribute' in call to target method.",
+        Justification = "Cast<T> is called from source-generated code that handles parseable types at compile time. The runtime TryParsableConvert fallback is only used in non-AOT scenarios.")]
+    public static T? Cast<[DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicParameterlessConstructor)] T>(object? value)
     {
-        if (value is null)
+        if (value is T t)
         {
-            return default(T?);
+            return t;
         }
 
-        if (value is T successfulCast)
-        {
-            return successfulCast;
-        }
-
-        var underlyingType = Nullable.GetUnderlyingType(typeof(T)) ?? typeof(T);
-
-        if (value.GetType().IsAssignableTo(underlyingType))
-        {
-            return (T) value;
-        }
-        
-        // Try AOT converter registry first
-        if (AotConverterRegistry.TryConvert(value.GetType(), underlyingType, value, out var converted))
-        {
-            return (T?) converted;
-        }
-
-        if (value is not string
-            && value is IEnumerable enumerable
-            && !value.GetType().IsArray  // Don't unwrap arrays
-            && !typeof(IEnumerable).IsAssignableFrom(typeof(T)))
-        {
-            // Special handling for CustomAttributeTypedArgument collections in .NET Framework
-            var typeName = value.GetType().FullName;
-            if (typeName != null && typeName.Contains("CustomAttributeTypedArgument"))
-            {
-                // For ReadOnlyCollection<CustomAttributeTypedArgument>, we need to extract the actual values
-                var firstItem = enumerable.Cast<object>().FirstOrDefault();
-                if (firstItem != null)
-                {
-                    // Use reflection to get the Value property
-                    var valueProperty = GetValuePropertySafe(firstItem.GetType());
-                    if (valueProperty != null)
-                    {
-                        value = valueProperty.GetValue(firstItem);
-                    }
-                    else
-                    {
-                        value = firstItem;
-                    }
-                }
-                else
-                {
-                    value = null;
-                }
-            }
-            else
-            {
-                value = enumerable.Cast<object>().ElementAtOrDefault(0);
-            }
-        }
-
-        if (underlyingType.IsEnum)
-        {
-            return (T?) Enum.ToObject(underlyingType, value!);
-        }
-
-        // Special handling for array types - check this before IConvertible
-        if (underlyingType.IsArray)
-        {
-            var targetElementType = underlyingType.GetElementType()!;
-            
-            // Handle null -> empty array
-            if (value is null)
-            {
-                return (T?)(object)Array.CreateInstance(targetElementType, 0);
-            }
-            
-            // Handle single value -> single element array
-            if (!value.GetType().IsArray)
-            {
-                if (value is IConvertible)
-                {
-                    try
-                    {
-                        var convertedValue = Convert.ChangeType(value, targetElementType);
-                        var array = Array.CreateInstance(targetElementType, 1);
-                        array.SetValue(convertedValue, 0);
-                        return (T?)(object)array;
-                    }
-                    catch
-                    {
-                        // If direct conversion fails, continue with other approaches
-                    }
-                }
-            }
-            // Handle array -> array with element type conversion
-            else if (value is Array sourceArray)
-            {
-                var sourceElementType = value.GetType().GetElementType()!;
-                
-                // If element types match, return as-is
-                if (sourceElementType == targetElementType)
-                {
-                    return (T?)value;
-                }
-                
-                // Otherwise, convert each element
-                try
-                {
-                    var targetArray = Array.CreateInstance(targetElementType, sourceArray.Length);
-                    for (int i = 0; i < sourceArray.Length; i++)
-                    {
-                        var sourceElement = sourceArray.GetValue(i);
-                        var convertedElement = sourceElement is IConvertible 
-                            ? Convert.ChangeType(sourceElement, targetElementType)
-                            : sourceElement;
-                        targetArray.SetValue(convertedElement, i);
-                    }
-                    return (T?)(object)targetArray;
-                }
-                catch
-                {
-                    // If conversion fails, continue with other approaches
-                }
-            }
-        }
-
-        var conversionMethod = GetConversionMethod(value!.GetType(), underlyingType);
-
-        if (conversionMethod is null && value is IConvertible)
-        {
-            return (T?) Convert.ChangeType(value, underlyingType);
-        }
-
-        if (conversionMethod is null)
-        {
-            // Check if we can do unboxing directly for value types
-            if (underlyingType.IsValueType && value.GetType() == typeof(object))
-            {
-                try
-                {
-                    return (T)value;
-                }
-                catch
-                {
-                    // If unboxing fails, continue with the original approach
-                }
-            }
-            
-            // Log diagnostic information for debugging single file mode issues
-            if (Environment.GetEnvironmentVariable("TUNIT_DIAGNOSTIC_CAST") == "true")
-            {
-                Console.WriteLine($"[CastHelper] No conversion found from {value.GetType().FullName} to {underlyingType.FullName}");
-            }
-            
-            return (T?) value;
-        }
-
-        // Even in source generation mode, we use reflection as a fallback for custom conversions
-        // The AOT analyzer will warn about incompatibility at compile time
-        try
-        {
-            return (T?) conversionMethod.Invoke(null, [value]);
-        }
-        catch (Exception ex) when (ex is NotSupportedException || ex is InvalidOperationException)
-        {
-            // In AOT scenarios, reflection invoke might fail
-            // Try a direct cast as a last resort
-            try
-            {
-                return (T)value;
-            }
-            catch
-            {
-                // If all else fails, return the value as-is and let the runtime handle it
-                return (T?)value;
-            }
-        }
+        var result = Cast(typeof(T), value);
+        return (T?)result;
     }
 
-    [UnconditionalSuppressMessage("Trimming", "IL2072", 
-        Justification = "Type conversion uses DynamicallyAccessedMembers for known conversion patterns. For AOT scenarios, use explicit type conversions.")]
-    [UnconditionalSuppressMessage("AOT", "IL3050", 
-        Justification = "Reflection-based conversion is a fallback for runtime scenarios. AOT applications should use explicit conversions.")]
-    public static object? Cast([DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicMethods | DynamicallyAccessedMemberTypes.NonPublicMethods)] Type type, object? value)
+    /// <summary>
+    /// Returns the value as-is if it's null or already assignable to the target type;
+    /// otherwise delegates to <see cref="Cast"/> to apply conversion operators.
+    /// Unlike <see cref="Cast"/>, null input always returns null (no default-value creation for value types).
+    /// In Native AOT mode, throws <see cref="InvalidCastException"/> when reflection-based
+    /// operator discovery is unavailable.
+    /// </summary>
+    [UnconditionalSuppressMessage("AOT", "IL3050:Calling members annotated with 'RequiresDynamicCodeAttribute' may break functionality when AOT compiling.")]
+    public static object? CastIfNeeded(
+        [DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicParameterlessConstructor
+            | DynamicallyAccessedMemberTypes.Interfaces
+            | DynamicallyAccessedMemberTypes.PublicMethods)] Type type,
+        object? value)
     {
-        if (value is null)
-        {
-            return null;
-        }
-
-        var underlyingType = Nullable.GetUnderlyingType(type) ?? type;
-
-        if (value.GetType().IsAssignableTo(underlyingType))
+        if (value is null || value.GetType().IsAssignableTo(type))
         {
             return value;
         }
 
-        // Try AOT converter registry first
-        if (AotConverterRegistry.TryConvert(value.GetType(), underlyingType, value, out var converted))
+        return Cast(type, value);
+    }
+
+    /// <summary>
+    /// Attempts to cast or convert a value to the specified type.
+    /// Conversion priority:
+    /// 1. Fast path: null handling, direct cast, nullable unwrapping
+    /// 2. AOT-safe: AotConverterRegistry, primitives, enums
+    /// 3. Reflection fallback: custom operators, arrays (throws in AOT)
+    /// </summary>
+    [UnconditionalSuppressMessage("AOT", "IL3050:Calling members annotated with 'RequiresDynamicCodeAttribute' may break functionality when AOT compiling.")]
+    public static object? Cast([DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicParameterlessConstructor | DynamicallyAccessedMemberTypes.Interfaces | DynamicallyAccessedMemberTypes.PublicMethods)] Type type, object? value)
+    {
+        // Fast path: handle null
+        if (value is null)
         {
-            return converted;
+            return type.IsValueType && Nullable.GetUnderlyingType(type) == null
+                ? Activator.CreateInstance(type) // default(T) for non-nullable value types
+                : null;
         }
 
+        var targetType = Nullable.GetUnderlyingType(type) ?? type;
+        var sourceType = value.GetType();
+
+        // Fast path: direct cast if types are assignable
+        if (sourceType.IsAssignableTo(targetType))
+        {
+            return value;
+        }
+
+        // Fast path: generic parameter types (can't convert)
         if (type.IsGenericParameter)
         {
             return value;
         }
 
-        if (value is not string
-            && value is IEnumerable enumerable
-            && !value.GetType().IsArray  // Don't unwrap arrays
-            && !typeof(IEnumerable).IsAssignableFrom(type))
+        // Layer 1: AOT-safe conversions (no reflection)
+        if (TryAotSafeConversion(targetType, sourceType, value, out var result))
         {
-            // Special handling for CustomAttributeTypedArgument collections in .NET Framework
-            var typeName = value.GetType().FullName;
-            if (typeName != null && typeName.Contains("CustomAttributeTypedArgument"))
+            return result;
+        }
+
+        // Layer 1.5: String-to-parseable conversions (uses reflection, but safe with proper annotations)
+        if (value is string stringValue && TryParseFromString(targetType, stringValue, out result))
+        {
+            return result;
+        }
+
+        // Layer 2: Reflection-based conversions (not AOT-compatible)
+        if (TryReflectionConversion(targetType, sourceType, value, out result))
+        {
+            return result;
+        }
+
+        // In AOT mode, if we reach here, throw a helpful diagnostic error
+        if (IsAotMode())
+        {
+            throw new InvalidCastException(
+                $"Cannot convert from '{sourceType.FullName}' to '{targetType.FullName}' in Native AOT mode. " +
+                $"No AOT converter was found in the AotConverterRegistry. " +
+                $"This typically happens when:\n" +
+                $"1. A conversion operator exists but was not discovered during source generation (e.g., operators generated by other source generators like OneOf)\n" +
+                $"2. The conversion requires reflection which is not supported in AOT\n" +
+                $"Consider:\n" +
+                $"- Manually registering an AOT converter using AotConverterRegistry.Register()\n" +
+                $"- Using explicit type conversions instead of relying on implicit operators\n" +
+                $"- Checking if your conversion operator is being generated after TUnit's source generators run");
+        }
+
+        // Last resort: return value as-is and hope for the best
+        return value;
+    }
+
+    private static bool TryAotSafeConversion(Type targetType, Type sourceType, object value, out object? result)
+    {
+        // Try AOT converter registry first
+        if (AotConverterRegistry.TryConvert(sourceType, targetType, value, out result))
+        {
+            return true;
+        }
+
+        // Handle IConvertible primitives (int, string, double, etc.)
+        if (value is IConvertible && targetType.IsPrimitive)
+        {
+            try
             {
-                // For ReadOnlyCollection<CustomAttributeTypedArgument>, we need to extract the actual values
-                var firstItem = enumerable.Cast<object>().FirstOrDefault();
-                if (firstItem != null)
-                {
-                    // Use reflection to get the Value property
-                    var valueProperty = GetValuePropertySafe(firstItem.GetType());
-                    if (valueProperty != null)
-                    {
-                        value = valueProperty.GetValue(firstItem);
-                    }
-                    else
-                    {
-                        value = firstItem;
-                    }
-                }
-                else
-                {
-                    value = null;
-                }
+                result = Convert.ChangeType(value, targetType);
+                return true;
             }
-            else
+            catch
             {
-                value = enumerable.Cast<object>().ElementAtOrDefault(0);
+                // Conversion failed, continue with other strategies
             }
         }
 
-        if (underlyingType.IsEnum)
+        // Handle enum conversions
+        if (targetType.IsEnum)
         {
-            return Enum.ToObject(underlyingType, value!);
+            try
+            {
+                result = Enum.ToObject(targetType, value);
+                return true;
+            }
+            catch
+            {
+                // Conversion failed
+            }
         }
 
-        // Special handling for array types - check this before IConvertible
-        if (underlyingType.IsArray)
+        // Unwrap single-element enumerables (but not strings or arrays)
+        if (value is not string && !sourceType.IsArray && value is IEnumerable enumerable && !typeof(IEnumerable).IsAssignableFrom(targetType))
         {
-            var targetElementType = underlyingType.GetElementType()!;
-            
-            // Handle null -> empty array
-            if (value is null)
+            var firstElement = enumerable.Cast<object>().FirstOrDefault();
+            if (firstElement != null)
             {
-                return Array.CreateInstance(targetElementType, 0);
+                // Recursively try to cast the first element
+                return TryAotSafeConversion(targetType, firstElement.GetType(), firstElement, out result);
             }
-            
-            // Handle single value -> single element array
-            if (!value.GetType().IsArray)
+        }
+
+        result = null;
+        return false;
+    }
+
+    private static bool TryParseFromString([DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.Interfaces | DynamicallyAccessedMemberTypes.PublicMethods)] Type targetType, string value, out object? result)
+    {
+#if NET
+        if (TryParsableConvert(targetType, value, out result))
+        {
+            return true;
+        }
+#else
+        if (targetType == typeof(DateTime) && DateTime.TryParse(value, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out var dateTime))
+        {
+            result = dateTime;
+            return true;
+        }
+        if (targetType == typeof(DateTimeOffset) && DateTimeOffset.TryParse(value, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out var dateTimeOffset))
+        {
+            result = dateTimeOffset;
+            return true;
+        }
+        if (targetType == typeof(TimeSpan) && TimeSpan.TryParse(value, System.Globalization.CultureInfo.InvariantCulture, out var timeSpan))
+        {
+            result = timeSpan;
+            return true;
+        }
+        if (targetType == typeof(Guid) && Guid.TryParse(value, out var guid))
+        {
+            result = guid;
+            return true;
+        }
+#endif
+
+        result = null;
+        return false;
+    }
+
+#if NET
+    private static readonly ConcurrentDictionary<Type, MethodInfo?> ParseMethodCache = new();
+
+    private static bool TryParsableConvert([DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.Interfaces | DynamicallyAccessedMemberTypes.PublicMethods)] Type targetType, string value, out object? result)
+    {
+        if (!ParseMethodCache.TryGetValue(targetType, out var parseMethod))
+        {
+            parseMethod = FindParseMethod(targetType);
+            ParseMethodCache.TryAdd(targetType, parseMethod);
+        }
+
+        if (parseMethod != null)
+        {
+            try
             {
-                if (value is IConvertible)
+                result = parseMethod.Invoke(null, [value, System.Globalization.CultureInfo.InvariantCulture]);
+                return true;
+            }
+            catch (Exception ex) when (ex is FormatException or OverflowException or ArgumentException or TargetInvocationException { InnerException: FormatException or OverflowException or ArgumentException })
+            {
+                // Parse failed for the given string value
+            }
+        }
+
+        result = null;
+        return false;
+    }
+
+    private static MethodInfo? FindParseMethod([DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.Interfaces | DynamicallyAccessedMemberTypes.PublicMethods)] Type type)
+    {
+        var iParsableInterface = type.GetInterfaces()
+            .FirstOrDefault(i => i.IsGenericType
+                && i.GetGenericTypeDefinition() == typeof(IParsable<>)
+                && i.GenericTypeArguments[0] == type);
+
+        if (iParsableInterface == null)
+        {
+            return null;
+        }
+
+        return type.GetMethod("Parse",
+            BindingFlags.Public | BindingFlags.Static,
+            null,
+            [typeof(string), typeof(IFormatProvider)],
+            null);
+    }
+#endif
+
+    [RequiresDynamicCode("Uses reflection to find custom conversion operators and create arrays, which is not compatible with AOT compilation.")]
+    [UnconditionalSuppressMessage("Trimming", "IL2072:Target parameter argument does not satisfy 'DynamicallyAccessedMembersAttribute'")]
+    private static bool TryReflectionConversion(Type targetType, Type sourceType, object value, out object? result)
+    {
+        // Check if we're in AOT mode - if so, skip reflection-based conversions
+        var isAotMode = IsAotMode();
+
+        // Handle array conversions (requires dynamic code)
+        if (!isAotMode && targetType.IsArray && TryConvertArray(targetType, sourceType, value, out result))
+        {
+            return true;
+        }
+
+        // Try custom conversion operators (op_Implicit, op_Explicit) - requires dynamic code
+        if (!isAotMode)
+        {
+            var conversionMethod = GetConversionMethodCached(sourceType, targetType);
+            if (conversionMethod != null)
+            {
+                try
                 {
+                    result = conversionMethod.Invoke(null, [value]);
+                    return true;
+                }
+                catch (Exception ex) when (ex is NotSupportedException || ex is InvalidOperationException)
+                {
+                    // Reflection invoke failed - likely in AOT scenario despite our check
+                    // Try direct cast as fallback
                     try
                     {
-                        var convertedValue = Convert.ChangeType(value, targetElementType);
-                        var array = Array.CreateInstance(targetElementType, 1);
-                        array.SetValue(convertedValue, 0);
-                        return array;
+                        result = value;
+                        return true;
                     }
                     catch
                     {
-                        // If direct conversion fails, continue with other approaches
+                        // Give up
                     }
                 }
             }
-            // Handle array -> array with element type conversion
-            else if (value is Array sourceArray)
+        }
+
+        // Try IConvertible for non-primitives
+        if (value is IConvertible)
+        {
+            try
             {
-                var sourceElementType = value.GetType().GetElementType()!;
-                
-                // If element types match, return as-is
-                if (sourceElementType == targetElementType)
-                {
-                    return value;
-                }
-                
-                // Otherwise, convert each element
-                try
-                {
-                    var targetArray = Array.CreateInstance(targetElementType, sourceArray.Length);
-                    for (int i = 0; i < sourceArray.Length; i++)
-                    {
-                        var sourceElement = sourceArray.GetValue(i);
-                        var convertedElement = sourceElement is IConvertible 
-                            ? Convert.ChangeType(sourceElement, targetElementType)
-                            : sourceElement;
-                        targetArray.SetValue(convertedElement, i);
-                    }
-                    return targetArray;
-                }
-                catch
-                {
-                    // If conversion fails, continue with other approaches
-                }
+                result = Convert.ChangeType(value, targetType);
+                return true;
+            }
+            catch
+            {
+                // Conversion failed
             }
         }
 
-        var conversionMethod = GetConversionMethod(value!.GetType(), underlyingType);
-
-        if (conversionMethod is null && value is IConvertible)
+        // Check for unboxing scenario
+        if (targetType.IsValueType && sourceType == typeof(object))
         {
-            return Convert.ChangeType(value, underlyingType);
-        }
-
-        if (conversionMethod is null)
-        {
-            // Check if we can do unboxing directly for value types
-            if (underlyingType.IsValueType && value.GetType() == typeof(object))
+            try
             {
-                try
-                {
-                    return value;
-                }
-                catch
-                {
-                    // If unboxing fails, continue with the original approach
-                }
+                result = value;
+                return true;
             }
-            return value;
+            catch
+            {
+                // Unboxing failed
+            }
         }
 
-        // Even in source generation mode, we use reflection as a fallback for custom conversions
-        // The AOT analyzer will warn about incompatibility at compile time
-        return conversionMethod.Invoke(null, [value]);
+        // Diagnostic logging for debugging
+        if (Environment.GetEnvironmentVariable("TUNIT_DIAGNOSTIC_CAST") == "true")
+        {
+            Console.WriteLine($"[CastHelper] No conversion found from {sourceType.FullName} to {targetType.FullName}");
+        }
+
+        result = null;
+        return false;
     }
 
-    public static MethodInfo? GetConversionMethod([DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicMethods | DynamicallyAccessedMemberTypes.NonPublicMethods)] Type baseType, [DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicMethods | DynamicallyAccessedMemberTypes.NonPublicMethods)] Type targetType)
+    [RequiresDynamicCode("Array element conversion requires dynamic code for type inspection and conversion.")]
+    [UnconditionalSuppressMessage("Trimming", "IL2072:Target parameter argument does not satisfy 'DynamicallyAccessedMembersAttribute'")]
+    private static bool TryConvertArray(Type targetType, Type sourceType, object value, out object? result)
     {
-        // In single file mode, we might need to look harder for conversion methods
-        // First try the base type methods (including inherited and declared only)
-        var baseMethods = baseType.GetMethods(BindingFlags.Public | BindingFlags.Static | BindingFlags.DeclaredOnly)
-            .Concat(baseType.GetMethods(BindingFlags.Public | BindingFlags.Static));
-        
-        // Then try the target type methods
-        var targetMethods = targetType.GetMethods(BindingFlags.Public | BindingFlags.Static | BindingFlags.DeclaredOnly)
-            .Concat(targetType.GetMethods(BindingFlags.Public | BindingFlags.Static));
-        
-        var methods = baseMethods.Concat(targetMethods).Distinct().ToArray();
+        var targetElementType = targetType.GetElementType()!;
+
+        // Handle null -> empty array
+        if (value is null)
+        {
+            result = Array.CreateInstance(targetElementType, 0);
+            return true;
+        }
+
+        // Handle single value -> single element array
+        if (!sourceType.IsArray)
+        {
+            if (value is IConvertible)
+            {
+                try
+                {
+                    var convertedValue = Convert.ChangeType(value, targetElementType);
+                    var array = Array.CreateInstance(targetElementType, 1);
+                    array.SetValue(convertedValue, 0);
+                    result = array;
+                    return true;
+                }
+                catch
+                {
+                    // Conversion failed
+                }
+            }
+
+            result = null;
+            return false;
+        }
+
+        // Handle array -> array with element type conversion
+        if (value is Array sourceArray)
+        {
+            var sourceElementType = sourceType.GetElementType()!;
+
+            // If element types match, return as-is
+            if (sourceElementType == targetElementType)
+            {
+                result = value;
+                return true;
+            }
+
+            // Convert each element
+            try
+            {
+                var targetArray = Array.CreateInstance(targetElementType, sourceArray.Length);
+                for (var i = 0; i < sourceArray.Length; i++)
+                {
+                    var sourceElement = sourceArray.GetValue(i);
+                    var convertedElement = sourceElement is IConvertible
+                        ? Convert.ChangeType(sourceElement, targetElementType)
+                        : sourceElement;
+                    targetArray.SetValue(convertedElement, i);
+                }
+                result = targetArray;
+                return true;
+            }
+            catch
+            {
+                // Array conversion failed
+            }
+        }
+
+        result = null;
+        return false;
+    }
+
+    [UnconditionalSuppressMessage("AOT", "IL3050:Calling members annotated with 'RequiresDynamicCodeAttribute' may break functionality when AOT compiling.")]
+    private static MethodInfo? GetConversionMethodCached(Type sourceType, Type targetType)
+    {
+        return ConversionMethodCache.GetOrAdd(
+            (sourceType, targetType),
+            static key => FindConversionMethod(key.Item1, key.Item2));
+    }
+
+    [RequiresDynamicCode("Finding conversion operators requires reflection which is not compatible with AOT compilation.")]
+    [UnconditionalSuppressMessage("Trimming", "IL2070:Target parameter argument does not satisfy 'DynamicallyAccessedMembersAttribute'")]
+    private static MethodInfo? FindConversionMethod(Type sourceType, Type targetType)
+    {
+        // Get all static methods from both types
+        var sourceMethods = sourceType.GetMethods(BindingFlags.Public | BindingFlags.Static);
+        var targetMethods = targetType.GetMethods(BindingFlags.Public | BindingFlags.Static);
 
         // Look for implicit conversion first
-        var implicitMethod = methods
-            .FirstOrDefault(mi =>
-                mi.Name == "op_Implicit" && mi.ReturnType == targetType && HasCorrectInputType(baseType, mi));
-        
-        if (implicitMethod != null)
+        foreach (var method in sourceMethods)
         {
-            return implicitMethod;
+            if (method.Name == "op_Implicit" && method.ReturnType == targetType && HasCorrectInputType(sourceType, method))
+            {
+                return method;
+            }
         }
 
-        // Then look for explicit conversion
-        return methods
-            .FirstOrDefault(mi =>
-                mi.Name == "op_Explicit" && mi.ReturnType == targetType && HasCorrectInputType(baseType, mi));
+        foreach (var method in targetMethods)
+        {
+            if (method.Name == "op_Implicit" && method.ReturnType == targetType && HasCorrectInputType(sourceType, method))
+            {
+                return method;
+            }
+        }
+
+        // Look for explicit conversion
+        foreach (var method in sourceMethods)
+        {
+            if (method.Name == "op_Explicit" && method.ReturnType == targetType && HasCorrectInputType(sourceType, method))
+            {
+                return method;
+            }
+        }
+
+        foreach (var method in targetMethods)
+        {
+            if (method.Name == "op_Explicit" && method.ReturnType == targetType && HasCorrectInputType(sourceType, method))
+            {
+                return method;
+            }
+        }
+
+        return null;
     }
 
-    private static bool HasCorrectInputType(Type baseType, MethodInfo mi)
+    private static bool HasCorrectInputType(Type expectedType, MethodInfo method)
     {
-        var pi = mi.GetParameters().FirstOrDefault();
-        return pi != null && pi.ParameterType == baseType;
+        var parameters = method.GetParameters();
+        return parameters.Length == 1 && parameters[0].ParameterType == expectedType;
     }
-    
-    /// <summary>
-    /// Gets the "Value" property from a type in an AOT-safer manner.
-    /// </summary>
-    [UnconditionalSuppressMessage("Trimming", "IL2075:Target method return value does not satisfy annotation requirements",
-        Justification = "Value property access is used for unwrapping CustomAttributeTypedArgument. For AOT scenarios, use source-generated attribute discovery.")]
-    private static PropertyInfo? GetValuePropertySafe([DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicProperties)] Type type)
+
+    private static bool IsAotMode()
     {
-        return type.GetProperty("Value");
+#if NET
+        return !RuntimeFeature.IsDynamicCodeSupported;
+#else
+        return false;
+#endif
     }
-    
 }

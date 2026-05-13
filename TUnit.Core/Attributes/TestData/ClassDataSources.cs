@@ -2,6 +2,7 @@
 using System.Reflection;
 using System.Runtime.ExceptionServices;
 using TUnit.Core.Data;
+using TUnit.Core.Interfaces;
 
 namespace TUnit.Core;
 
@@ -11,11 +12,14 @@ internal class ClassDataSources
     {
     }
 
-    public static readonly GetOnlyDictionary<string, ClassDataSources> SourcesPerSession = new();
+    public static readonly ThreadSafeDictionary<string, ClassDataSources> SourcesPerSession = new();
 
-    public static ClassDataSources Get(string sessionId) => SourcesPerSession.GetOrAdd(sessionId, _ => new());
+    public static ClassDataSources Get(string sessionId)
+    {
+        return SourcesPerSession.GetOrAdd(sessionId, static _ => new ClassDataSources());
+    }
 
-    public (T, SharedType, string) GetItemForIndexAsync<[DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicConstructors | DynamicallyAccessedMemberTypes.PublicProperties | DynamicallyAccessedMemberTypes.PublicMethods)] T>(int index, Type? testClassType, SharedType[] sharedTypes, string[] keys, DataGeneratorMetadata dataGeneratorMetadata) where T : new()
+    public (T, SharedType, string) GetItemForIndexAsync<[DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicConstructors | DynamicallyAccessedMemberTypes.NonPublicConstructors | DynamicallyAccessedMemberTypes.PublicProperties | DynamicallyAccessedMemberTypes.NonPublicProperties)] T>(int index, Type testClassType, SharedType[] sharedTypes, string[] keys, DataGeneratorMetadata dataGeneratorMetadata) where T : new()
     {
         var shared = sharedTypes.ElementAtOrDefault(index);
 
@@ -36,94 +40,55 @@ internal class ClassDataSources
         return keys.ElementAtOrDefault(keyedIndex) ?? throw new ArgumentException($"Key at index {keyedIndex} not found");
     }
 
-    public T Get<[DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicConstructors | DynamicallyAccessedMemberTypes.PublicProperties | DynamicallyAccessedMemberTypes.PublicMethods)] T>(SharedType sharedType, Type? testClassType, string key, DataGeneratorMetadata dataGeneratorMetadata)
+    public T Get<[DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicConstructors | DynamicallyAccessedMemberTypes.NonPublicConstructors | DynamicallyAccessedMemberTypes.PublicProperties | DynamicallyAccessedMemberTypes.NonPublicProperties)] T>(SharedType sharedType, Type testClassType, string key, DataGeneratorMetadata dataGeneratorMetadata)
     {
-#pragma warning disable CS8603 // Possible null reference return.
-        if (sharedType == SharedType.None)
+        return sharedType switch
         {
-            return Create<T>(dataGeneratorMetadata);
-        }
-
-        if (sharedType == SharedType.PerTestSession)
-        {
-            return (T) TestDataContainer.GetGlobalInstance(typeof(T), () => Create(typeof(T), dataGeneratorMetadata));
-        }
-
-        if (sharedType == SharedType.PerClass)
-        {
-            if (testClassType == null)
-            {
-                throw new InvalidOperationException($"Cannot use SharedType.PerClass without a test class type. This may occur during static property initialization.");
-            }
-            return (T) TestDataContainer.GetInstanceForClass(testClassType, typeof(T), () => Create(typeof(T), dataGeneratorMetadata));
-        }
-
-        if (sharedType == SharedType.Keyed)
-        {
-            return (T) TestDataContainer.GetInstanceForKey(key, typeof(T), () => Create(typeof(T), dataGeneratorMetadata));
-        }
-
-        if (sharedType == SharedType.PerAssembly)
-        {
-            if (testClassType == null)
-            {
-                throw new InvalidOperationException($"Cannot use SharedType.PerAssembly without a test class type. This may occur during static property initialization.");
-            }
-            return (T) TestDataContainer.GetInstanceForAssembly(testClassType.Assembly, typeof(T), () => Create(typeof(T), dataGeneratorMetadata));
-        }
-#pragma warning restore CS8603 // Possible null reference return.
-
-        throw new ArgumentOutOfRangeException();
+            SharedType.None => Create<T>(),
+            SharedType.PerTestSession => (T) TestDataContainer.GetGlobalInstance(typeof(T), _ => Create(typeof(T)))!,
+            SharedType.PerClass => (T) TestDataContainer.GetInstanceForClass(testClassType, typeof(T), _ => Create(typeof(T)))!,
+            SharedType.Keyed => (T) TestDataContainer.GetInstanceForKey(key, typeof(T), _ => CreateWithKey(typeof(T), key))!,
+            SharedType.PerAssembly => (T) TestDataContainer.GetInstanceForAssembly(testClassType.Assembly, typeof(T), _ => Create(typeof(T)))!,
+            _ => throw new ArgumentOutOfRangeException()
+        };
     }
 
-    public object Get(SharedType sharedType, [DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicConstructors | DynamicallyAccessedMemberTypes.PublicProperties | DynamicallyAccessedMemberTypes.PublicMethods)] Type type, Type? testClassType, string? key, DataGeneratorMetadata dataGeneratorMetadata)
+    public object? Get(SharedType sharedType, [DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicConstructors | DynamicallyAccessedMemberTypes.NonPublicConstructors | DynamicallyAccessedMemberTypes.PublicProperties | DynamicallyAccessedMemberTypes.NonPublicProperties)] Type type, Type testClassType, string? key, DataGeneratorMetadata dataGeneratorMetadata)
     {
-        if (sharedType == SharedType.None)
+        return sharedType switch
         {
-            return Create(type, dataGeneratorMetadata);
+            SharedType.None => Create(type),
+            SharedType.PerTestSession => TestDataContainer.GetGlobalInstance(type, _ => Create(type)),
+            SharedType.PerClass => TestDataContainer.GetInstanceForClass(testClassType, type, _ => Create(type)),
+            SharedType.Keyed => TestDataContainer.GetInstanceForKey(key!, type, _ => CreateWithKey(type, key!)),
+            SharedType.PerAssembly => TestDataContainer.GetInstanceForAssembly(testClassType.Assembly, type, _ => Create(type)),
+            _ => throw new ArgumentOutOfRangeException()
+        };
+    }
+
+    private static object CreateWithKey([DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicConstructors | DynamicallyAccessedMemberTypes.NonPublicConstructors)] Type type, string key)
+    {
+        var instance = Create(type);
+
+        if (instance is IKeyedDataSource keyed)
+        {
+            keyed.Key = key;
         }
 
-        if (sharedType == SharedType.PerTestSession)
-        {
-            return TestDataContainer.GetGlobalInstance(type, () => Create(type, dataGeneratorMetadata));
-        }
-
-        if (sharedType == SharedType.PerClass)
-        {
-            if (testClassType == null)
-            {
-                throw new InvalidOperationException($"Cannot use SharedType.PerClass without a test class type. This may occur during static property initialization.");
-            }
-            return TestDataContainer.GetInstanceForClass(testClassType, type, () => Create(type, dataGeneratorMetadata));
-        }
-
-        if (sharedType == SharedType.Keyed)
-        {
-            return TestDataContainer.GetInstanceForKey(key!, type, () => Create(type, dataGeneratorMetadata));
-        }
-
-        if (sharedType == SharedType.PerAssembly)
-        {
-            if (testClassType == null)
-            {
-                throw new InvalidOperationException($"Cannot use SharedType.PerAssembly without a test class type. This may occur during static property initialization.");
-            }
-            return TestDataContainer.GetInstanceForAssembly(testClassType.Assembly, type, () => Create(type, dataGeneratorMetadata));
-        }
-
-        throw new ArgumentOutOfRangeException();
+        return instance;
     }
 
     [return: NotNull]
-    private static T Create<[DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicConstructors | DynamicallyAccessedMemberTypes.PublicProperties | DynamicallyAccessedMemberTypes.PublicMethods)] T>(DataGeneratorMetadata dataGeneratorMetadata)
+    private static T Create<[DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicConstructors | DynamicallyAccessedMemberTypes.NonPublicConstructors)] T>()
     {
-        return ((T) Create(typeof(T), dataGeneratorMetadata))!;
+        return ((T) Create(typeof(T)))!;
     }
 
-    private static object Create([DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicConstructors | DynamicallyAccessedMemberTypes.PublicProperties | DynamicallyAccessedMemberTypes.PublicMethods)] Type type, DataGeneratorMetadata dataGeneratorMetadata)
+    private static object Create([DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicConstructors | DynamicallyAccessedMemberTypes.NonPublicConstructors)] Type type)
     {
         try
         {
+            // Just create the instance - initialization happens in the Engine
             return Activator.CreateInstance(type)!;
         }
         catch (TargetInvocationException targetInvocationException)

@@ -1,6 +1,4 @@
 ﻿using System.Diagnostics.CodeAnalysis;
-using TUnit.Assertions.AssertConditions.Throws;
-
 namespace TUnit.Assertions.Tests;
 
 [UnconditionalSuppressMessage("Usage", "TUnitAssertions0005:Assert.That(...) should not be used with a constant value")]
@@ -23,7 +21,7 @@ public class AssertMultipleTests
 
                 await Assert.That(3).IsEqualTo(6);
             }
-        }).Throws<Exception>().And.HasMessageContaining("Hello World");
+        }).Throws<Exception>().And.HasMessageContaining("Expected to be 2");
     }
 
     [Test]
@@ -53,7 +51,7 @@ public class AssertMultipleTests
         }).Throws<Exception>();
 
         await Assert.That(exception!.Message)
-            .Contains("(This exception may or may not have been caught) System.Exception: Hello World");
+            .Contains("Expected to be 2");
     }
 
     [Test]

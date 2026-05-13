@@ -1,6 +1,7 @@
 ﻿using EnumerableAsyncProcessor.Extensions;
 using Microsoft.Extensions.Options;
 using ModularPipelines.Attributes;
+using ModularPipelines.Configuration;
 using ModularPipelines.Context;
 using ModularPipelines.DotNet.Extensions;
 using ModularPipelines.DotNet.Options;
@@ -8,6 +9,7 @@ using ModularPipelines.Git.Attributes;
 using ModularPipelines.Git.Extensions;
 using ModularPipelines.Models;
 using ModularPipelines.Modules;
+using ModularPipelines.Options;
 
 namespace TUnit.Pipeline.Modules;
 
@@ -15,35 +17,48 @@ namespace TUnit.Pipeline.Modules;
 [RunOnLinuxOnly]
 [DependsOn<PackTUnitFilesModule>]
 [DependsOn<TestNugetPackageModule>]
+[DependsOn<RunEngineTestsModule>]
 [DependsOn<TestFSharpNugetPackageModule>]
 [DependsOn<TestVBNugetPackageModule>]
 public class UploadToNuGetModule(IOptions<NuGetOptions> options) : Module<CommandResult[]>
 {
-    protected override Task<SkipDecision> ShouldSkip(IPipelineContext context)
-    {
-        if (!options.Value.ShouldPublish)
+    protected override ModuleConfiguration Configure() => ModuleConfiguration.Create()
+        .WithSkipWhen(_ =>
         {
-            return Task.FromResult<SkipDecision>("Should Publish is false");
-        }
+            if (!options.Value.ShouldPublish)
+            {
+                return SkipDecision.Skip("Should Publish is false");
+            }
 
-        if (string.IsNullOrEmpty(options.Value.ApiKey))
-        {
-            return Task.FromResult<SkipDecision>("No API key found");
-        }
+            if (string.IsNullOrEmpty(options.Value.ApiKey))
+            {
+                return SkipDecision.Skip("No API key found");
+            }
 
-        return Task.FromResult<SkipDecision>(false);
-    }
+            return SkipDecision.DoNotSkip;
+        })
+        .Build();
 
-    protected override async Task<CommandResult[]?> ExecuteAsync(IPipelineContext context, CancellationToken cancellationToken)
+    protected override async Task<CommandResult[]?> ExecuteAsync(IModuleContext context, CancellationToken cancellationToken)
     {
         var nupkgs = context.Git().RootDirectory
-            .GetFiles(x => x.Extension is ".nupkg");
+            .GetFiles(x => x.NameWithoutExtension.Contains("TUnit") && x.Extension is ".nupkg");
 
         return await nupkgs.SelectAsync(file =>
-                context.DotNet().Nuget.Push(new DotNetNugetPushOptions(file)
+                context.DotNet().Nuget.Push(new DotNetNugetPushOptions
                 {
+                    Path = file.Path,
                     Source = "https://api.nuget.org/v3/index.json",
-                    ApiKey = options.Value.ApiKey
+                    ApiKey = options.Value.ApiKey,
+                }, new CommandExecutionOptions
+                {
+                    LogSettings = new CommandLoggingOptions
+                    {
+                        ShowCommandArguments = true,
+                        ShowStandardError = true,
+                        ShowExecutionTime = true,
+                        ShowExitCode = true
+                    }
                 }, cancellationToken), cancellationToken: cancellationToken)
             .ProcessOneAtATime();
     }

@@ -1,24 +1,39 @@
+using System.Diagnostics;
+using TUnit.Core.Helpers;
+using TUnit.Core.Models;
+
 namespace TUnit.Core;
 
+[DebuggerDisplay("{Metadata.TestClassType.Name}.{Metadata.TestName}")]
 public abstract class AbstractExecutableTest
 {
     public required string TestId { get; init; }
 
-    public virtual TestMetadata Metadata { get; init; } = null!;
+    public TestMetadata Metadata { get; init; } = null!;
 
-    /// <summary>
-    /// Empty for parameterless tests
-    /// </summary>
     public required object?[] Arguments { get; init; }
 
-    /// <summary>
-    /// Empty for parameterless constructors
-    /// </summary>
     public object?[] ClassArguments { get; init; } = [];
 
     public abstract Task<object> CreateInstanceAsync();
 
     public abstract Task InvokeTestAsync(object instance, CancellationToken cancellationToken);
+
+    // Cache fields for filtering performance
+    internal string? CachedFilterPath { get; set; }
+    // Using object to avoid type dependency on Microsoft.Testing.Platform.Extensions.Messages.PropertyBag
+    internal object? CachedPropertyBag { get; set; }
+
+    // Set once at grouping time for tests landing in GroupedTests.NotInParallel
+    // (global [NotInParallel], no keys, no ParallelGroup). TestRunner reads this
+    // per-execution to decide whether to acquire the global exclusion lock —
+    // avoiding a per-test scan over ParallelConstraints in the hot path.
+    internal bool RequiresGlobalNotInParallelLock { get; set; }
+
+    // Set by the scheduler for tests that either have dependencies or are the target of
+    // another test's dependency. These tests can be reached from both the scheduler and
+    // dependency recursion, so TestRunner must keep using its execution dedup ledger.
+    internal bool RequiresExecutionDedup { get; set; }
 
     public required TestContext Context
     {
@@ -30,14 +45,19 @@ public abstract class AbstractExecutableTest
         }
     }
 
-    public AbstractExecutableTest[] Dependencies { get; set; } = [];
+    public ResolvedDependency[] Dependencies { get; set; } = [];
+
+    /// <summary>
+    /// Execution context information for this test, used to coordinate class hooks properly
+    /// </summary>
+    public TestExecutionContext? ExecutionContext { get; set; }
 
     public TestState State { get; set; } = TestState.NotStarted;
 
     public TestResult? Result
     {
-        get => Context.Result;
-        set => Context.Result = value;
+        get => Context.Execution.Result;
+        set => Context.Execution.Result = value;
     }
 
     public DateTimeOffset? StartTime
@@ -46,9 +66,46 @@ public abstract class AbstractExecutableTest
         set => Context.TestStart = value ?? DateTimeOffset.UtcNow;
     }
 
-    public DateTimeOffset? EndTime { get => Context.TestEnd; set => Context.TestEnd = value; }
+    /// <summary>
+    /// Gets the task representing this test's execution, set directly by the scheduler.
+    /// </summary>
+    public Task? ExecutionTask { get; internal set; }
+
+    public Task CompletionTask => ExecutionTask ?? Task.CompletedTask;
+
+    public DateTimeOffset? EndTime { get => Context.Execution.TestEnd; set => Context.Execution.TestEnd = value; }
 
     public TimeSpan? Duration => StartTime.HasValue && EndTime.HasValue
         ? EndTime.Value - StartTime.Value
         : null;
+
+    public void SetResult(TestState state, Exception? exception = null)
+    {
+        State = state;
+
+        // Skip the reader/writer lock + StringBuilder dance entirely when nothing
+        // was ever written — the common passing-test case.
+        var combinedOutput = string.Empty;
+        if (Context.HasCapturedOutput)
+        {
+            var output = Context.GetOutput();
+            var errorOutput = Context.GetErrorOutput();
+
+            if (output.Length > 0 || errorOutput.Length > 0)
+            {
+                combinedOutput = string.Concat(output, Environment.NewLine, Environment.NewLine, errorOutput);
+            }
+        }
+
+        Context.Execution.Result ??= new TestResult
+        {
+            State = state,
+            Exception = exception,
+            ComputerName = EnvironmentHelper.MachineName,
+            Duration = Duration,
+            End = EndTime ??= DateTimeOffset.UtcNow,
+            Start = StartTime ??= DateTimeOffset.UtcNow,
+            Output = combinedOutput
+        };
+    }
 }

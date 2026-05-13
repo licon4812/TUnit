@@ -14,18 +14,6 @@ public abstract class TestMetadata
 
     public required string TestMethodName { get; init; }
 
-    public bool IsSkipped { get; init; }
-
-    public string? SkipReason { get; init; }
-
-    public int? TimeoutMs { get; init; }
-
-    public int RetryCount { get; init; }
-
-    public int RepeatCount { get; init; }
-
-    public bool CanRunInParallel { get; init; } = true;
-
     public TestDependency[] Dependencies { get; init; } = [];
 
     public required IDataSourceAttribute[] DataSources { get; init; } = [];
@@ -47,15 +35,9 @@ public abstract class TestMetadata
     /// </summary>
     public Func<object, object?[], Task>? TestInvoker { get; init; }
 
-    public int ParameterCount { get; init; }
+    public required string FilePath { get; init; }
 
-    public Type[] ParameterTypes { get; init; } = [];
-
-    public string[] TestMethodParameterTypes { get; init; } = [];
-
-    public string? FilePath { get; init; }
-
-    public int? LineNumber { get; init; }
+    public required int LineNumber { get; init; }
 
     public required MethodMetadata MethodMetadata { get; init; }
 
@@ -67,12 +49,77 @@ public abstract class TestMetadata
 
     public required Func<Attribute[]> AttributeFactory { get; init; }
 
+    /// <summary>
+    /// Class-shared indexed attribute factory. When set, used in preference to <see cref="AttributeFactory"/>
+    /// so TestEntry-emitted metadata avoids allocating a per-test closure over <see cref="AttributeGroupIndex"/>.
+    /// </summary>
+    internal Func<int, Attribute[]>? IndexedAttributeFactory { get; init; }
+
+    /// <summary>
+    /// Index passed to <see cref="IndexedAttributeFactory"/>. Unused unless that property is set.
+    /// </summary>
+    internal int AttributeGroupIndex { get; init; }
+
+    private Attribute[]? _cachedAttributes;
+
+    /// <summary>
+    /// Returns the cached attributes array, creating it from <see cref="IndexedAttributeFactory"/>
+    /// (preferred) or <see cref="AttributeFactory"/> on first call. Subsequent calls return the same array.
+    /// </summary>
+    internal Attribute[] GetOrCreateAttributes()
+    {
+        // Benign race: factories are idempotent, so on contention we may build two arrays and
+        // discard the loser. CAS publishes exactly one and every future reader sees it — cheaper
+        // than a lock on the hot path.
+        var cached = _cachedAttributes;
+        if (cached is not null)
+        {
+            return cached;
+        }
+
+        var indexed = IndexedAttributeFactory;
+        Attribute[] produced;
+        if (indexed is not null)
+        {
+            produced = indexed(AttributeGroupIndex);
+        }
+        else
+        {
+            // Throw with test context at the call site so diagnostics identify the offending
+            // metadata — the sentinel delegate itself has no access to TestName/TestClassType.
+            if (ReferenceEquals(AttributeFactory, TestEntrySentinel.IndexedAttributeFactoryPlaceholder))
+            {
+                throw new InvalidOperationException(
+                    $"Test metadata for '{TestName}' on '{TestClassType?.FullName}' is missing an attribute factory. Either IndexedAttributeFactory or AttributeFactory must be supplied.");
+            }
+            produced = AttributeFactory();
+        }
+        return Interlocked.CompareExchange(ref _cachedAttributes, produced, null) ?? produced;
+    }
+
+    /// <summary>
+    /// Pre-extracted repeat count from RepeatAttribute.
+    /// Null if no repeat attribute is present (defaults to 0 at usage site).
+    /// Pre-extracting this avoids instantiating all attributes just to read the repeat count.
+    /// </summary>
+    public int? RepeatCount { get; init; }
+
     public PropertyInjectionData[] PropertyInjections { get; init; } = [];
 
     /// <summary>
-    /// Test session ID used for data generation
+    /// Test session ID used for data generation. Callers must assign a real session id before
+    /// any data-generation code reads it; defaulting to an empty string avoids the per-instance
+    /// <see cref="Guid.NewGuid"/> allocation that every engine caller immediately overwrites.
     /// </summary>
-    public string TestSessionId { get; set; } = Guid.NewGuid().ToString();
+    public string TestSessionId { get; set; } = string.Empty;
+
+    /// <summary>
+    /// The depth of inheritance for this test method.
+    /// 0 = method is defined directly in the test class
+    /// 1 = method is inherited from immediate base class
+    /// 2 = method is inherited from base's base class, etc.
+    /// </summary>
+    public int InheritanceDepth { get; set; } = 0;
 
     /// <summary>
     /// Factory delegate that creates an ExecutableTest for this metadata.

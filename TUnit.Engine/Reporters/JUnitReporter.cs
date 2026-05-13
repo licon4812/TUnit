@@ -1,0 +1,176 @@
+using System.Collections.Concurrent;
+using System.Reflection;
+using System.Text;
+using Microsoft.Testing.Platform.Extensions;
+using Microsoft.Testing.Platform.Extensions.Messages;
+using Microsoft.Testing.Platform.Extensions.TestHost;
+using TUnit.Engine.Configuration;
+using TUnit.Engine.Constants;
+using TUnit.Engine.Framework;
+using TUnit.Engine.Helpers;
+using TUnit.Engine.Xml;
+
+namespace TUnit.Engine.Reporters;
+
+public class JUnitReporter(IExtension extension) : IDataConsumer, ITestHostApplicationLifetime, IFilterReceiver
+{
+    private string _outputPath = null!;
+    private bool _isEnabled;
+    private string _resultsDirectory = "TestResults";
+
+    public async Task<bool> IsEnabledAsync()
+    {
+        // Check if explicitly disabled
+        if (Environment.GetEnvironmentVariable(EnvironmentConstants.DisableJUnitReporter) is not null)
+        {
+            return false;
+        }
+
+        // Check if explicitly enabled OR running in GitLab CI
+        var explicitlyEnabled = Environment.GetEnvironmentVariable(EnvironmentConstants.EnableJUnitReporter) is not null;
+        var runningInGitLab = Environment.GetEnvironmentVariable(EnvironmentConstants.GitLabCi) is not null ||
+                              Environment.GetEnvironmentVariable(EnvironmentConstants.CiServer) is not null;
+
+        if (!explicitlyEnabled && !runningInGitLab)
+        {
+            return false;
+        }
+
+        _isEnabled = true;
+        return await extension.IsEnabledAsync();
+    }
+
+    public string Uid { get; } = $"{extension.Uid}JUnitReporter";
+
+    public string Version => extension.Version;
+
+    public string DisplayName => extension.DisplayName;
+
+    public string Description => extension.Description;
+
+    private readonly ConcurrentDictionary<string, TestNodeUpdateMessage> _latestUpdates = [];
+
+    public Task ConsumeAsync(IDataProducer dataProducer, IData value, CancellationToken cancellationToken)
+    {
+        var testNodeUpdateMessage = (TestNodeUpdateMessage)value;
+
+        _latestUpdates[testNodeUpdateMessage.TestNode.Uid.Value] = testNodeUpdateMessage;
+
+        return Task.CompletedTask;
+    }
+
+    public Type[] DataTypesConsumed { get; } = [typeof(TestNodeUpdateMessage)];
+
+    public Task BeforeRunAsync(CancellationToken cancellationToken)
+    {
+        return Task.CompletedTask;
+    }
+
+    public async Task AfterRunAsync(int exitCode, CancellationToken cancellation)
+    {
+        if (!_isEnabled || _latestUpdates.IsEmpty)
+        {
+            return;
+        }
+
+        // Get the last update for each test
+        var lastUpdates = new List<TestNodeUpdateMessage>(_latestUpdates.Count);
+        foreach (var kvp in _latestUpdates)
+        {
+            lastUpdates.Add(kvp.Value);
+        }
+
+        // Generate JUnit XML
+        var xmlContent = JUnitXmlWriter.GenerateXml(lastUpdates, Filter);
+
+        if (string.IsNullOrEmpty(xmlContent))
+        {
+            return;
+        }
+
+        // Determine output path (only if not already set via command-line argument)
+        if (string.IsNullOrEmpty(_outputPath))
+        {
+            var envPath = Environment.GetEnvironmentVariable(EnvironmentConstants.JUnitXmlOutputPath);
+
+            _outputPath = envPath is not null
+                ? PathValidator.ValidateAndNormalizePath(envPath, nameof(EnvironmentConstants.JUnitXmlOutputPath))
+                : GetDefaultOutputPath();
+        }
+
+        // Write to file with retry logic
+        await WriteXmlFileAsync(_outputPath, xmlContent, cancellation);
+    }
+
+    public string? Filter { get; set; }
+
+    internal void SetOutputPath(string path)
+    {
+        _outputPath = PathValidator.ValidateAndNormalizePath(path, nameof(path));
+    }
+
+    // Called by the AddTestSessionLifetimeHandler factory at startup, before any session events fire,
+    // so _resultsDirectory is guaranteed to be set before AfterRunAsync is invoked.
+    internal void SetResultsDirectory(string path)
+    {
+        _resultsDirectory = path;
+    }
+
+    private string GetDefaultOutputPath()
+    {
+        var assemblyName = Assembly.GetEntryAssembly()?.GetName().Name ?? "TestResults";
+
+        // Sanitize assembly name to remove any characters that could be used for path traversal
+        var sanitizedName = string.Concat(assemblyName.Split(Path.GetInvalidFileNameChars()));
+
+        return Path.GetFullPath(Path.Combine(_resultsDirectory, $"{sanitizedName}-junit.xml"));
+    }
+
+    private static async Task WriteXmlFileAsync(string path, string content, CancellationToken cancellationToken)
+    {
+        // Ensure directory exists
+        var directory = Path.GetDirectoryName(path);
+        if (!string.IsNullOrEmpty(directory) && !Directory.Exists(directory))
+        {
+            Directory.CreateDirectory(directory);
+        }
+
+        const int maxAttempts = EngineDefaults.FileWriteMaxAttempts;
+
+        for (int attempt = 1; attempt <= maxAttempts; attempt++)
+        {
+            try
+            {
+#if NET
+                await File.WriteAllTextAsync(path, content, Encoding.UTF8, cancellationToken);
+#else
+                File.WriteAllText(path, content, Encoding.UTF8);
+#endif
+                Console.WriteLine($"JUnit XML report written to: {path}");
+                return;
+            }
+            catch (IOException ex) when (attempt < maxAttempts && IsFileLocked(ex))
+            {
+                var baseDelay = EngineDefaults.BaseRetryDelayMs * Math.Pow(2, attempt - 1);
+                var jitter = Random.Shared.Next(0, EngineDefaults.MaxRetryJitterMs);
+                var delay = (int)(baseDelay + jitter);
+
+                Console.WriteLine($"JUnit XML file is locked, retrying in {delay}ms (attempt {attempt}/{maxAttempts})");
+                await Task.Delay(delay, cancellationToken);
+            }
+        }
+
+        Console.WriteLine($"Failed to write JUnit XML report to: {path} after {maxAttempts} attempts");
+    }
+
+    private static bool IsFileLocked(IOException exception)
+    {
+        // Check if the exception is due to the file being locked/in use
+        // HResult 0x80070020 is ERROR_SHARING_VIOLATION on Windows
+        // HResult 0x80070021 is ERROR_LOCK_VIOLATION on Windows
+        var errorCode = exception.HResult & 0xFFFF;
+        return errorCode == 0x20 || errorCode == 0x21 ||
+               exception.Message.Contains("being used by another process") ||
+               exception.Message.Contains("access denied", StringComparison.OrdinalIgnoreCase);
+    }
+}

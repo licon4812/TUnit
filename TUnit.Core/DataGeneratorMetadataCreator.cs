@@ -1,6 +1,5 @@
-using System.Collections.Generic;
+﻿using System.Collections.Concurrent;
 using System.Diagnostics.CodeAnalysis;
-using System.Linq;
 using System.Reflection;
 using TUnit.Core.Enums;
 
@@ -14,7 +13,8 @@ internal static class DataGeneratorMetadataCreator
         DataGeneratorType generatorType,
         object? testClassInstance,
         object?[]? classInstanceArguments,
-        TestBuilderContextAccessor contextAccessor)
+        TestBuilderContextAccessor contextAccessor,
+        Func<Type, Task<object?>>? instanceFactory = null)
     {
         // Determine which parameters we're generating for
         var parametersToGenerate = generatorType == DataGeneratorType.ClassParameters
@@ -24,8 +24,8 @@ internal static class DataGeneratorMetadataCreator
         // Filter out CancellationToken if it's the last parameter (handled by the engine)
         if (generatorType == DataGeneratorType.TestParameters && parametersToGenerate.Length > 0)
         {
-            var lastParam = parametersToGenerate[parametersToGenerate.Length - 1];
-            if (lastParam.Type == typeof(System.Threading.CancellationToken))
+            var lastParam = parametersToGenerate[^1];
+            if (lastParam.Type == typeof(CancellationToken))
             {
                 var newArray = new ParameterMetadata[parametersToGenerate.Length - 1];
                 Array.Copy(parametersToGenerate, 0, newArray, 0, parametersToGenerate.Length - 1);
@@ -33,12 +33,9 @@ internal static class DataGeneratorMetadataCreator
             }
         }
 
-        // Handle property data generation specifically
-        MemberMetadata[] membersToGenerate;
+        IMemberMetadata[] membersToGenerate;
         if (generatorType == DataGeneratorType.Property)
         {
-            // For properties, we generate data for properties that have data sources
-            // If PropertyDataSources is populated, use only those properties
             if (testMetadata.PropertyDataSources.Length > 0)
             {
                 var propertyMetadataList = new List<PropertyMetadata>();
@@ -57,13 +54,11 @@ internal static class DataGeneratorMetadataCreator
             }
             else
             {
-                // If no specific PropertyDataSources, include all class properties
                 membersToGenerate = testMetadata.MethodMetadata.Class.Properties;
             }
         }
         else
         {
-            // For parameters (class or test), use the parameter metadata
             membersToGenerate = [..parametersToGenerate];
         }
 
@@ -75,7 +70,8 @@ internal static class DataGeneratorMetadataCreator
             Type = generatorType,
             TestSessionId = testSessionId,
             TestClassInstance = testClassInstance,
-            ClassInstanceArguments = classInstanceArguments
+            ClassInstanceArguments = classInstanceArguments,
+            InstanceFactory = instanceFactory
         };
     }
 
@@ -89,7 +85,7 @@ internal static class DataGeneratorMetadataCreator
         string testSessionId = "reflection-discovery")
     {
         // Determine which members we're generating for based on type
-        MemberMetadata[] membersToGenerate = generatorType switch
+        IMemberMetadata[] membersToGenerate = generatorType switch
         {
             DataGeneratorType.ClassParameters => methodMetadata.Class.Parameters,
             DataGeneratorType.TestParameters => FilterOutCancellationToken(methodMetadata.Parameters),
@@ -101,7 +97,7 @@ internal static class DataGeneratorMetadataCreator
         {
             TestBuilderContext = new TestBuilderContextAccessor(new TestBuilderContext
             {
-                TestMetadata = null! // Not available during discovery
+                TestMetadata = null!, // Not available during discovery
             }),
             MembersToGenerate = membersToGenerate,
             TestInformation = methodMetadata,
@@ -116,14 +112,19 @@ internal static class DataGeneratorMetadataCreator
     /// Creates minimal DataGeneratorMetadata for discovery phase when inferring generic types.
     /// This is used when we need to get data from sources to determine generic type arguments.
     /// </summary>
+    /// <param name="dataSource">The data source attribute.</param>
+    /// <param name="existingMethodMetadata">Optional method metadata if available.</param>
+    /// <param name="instanceFactory">Optional factory for creating instances with property injection.
+    /// Used in reflection mode when instance data sources depend on property injection.</param>
     public static DataGeneratorMetadata CreateForGenericTypeDiscovery(
         IDataSourceAttribute dataSource,
-        MethodMetadata? existingMethodMetadata = null)
+        MethodMetadata? existingMethodMetadata = null,
+        Func<Type, Task<object?>>? instanceFactory = null)
     {
         var dummyParameter = new ParameterMetadata(typeof(object))
         {
             Name = "param0",
-            TypeReference = new TypeReference { AssemblyQualifiedName = typeof(object).AssemblyQualifiedName },
+            TypeInfo = new ConcreteType(typeof(object)),
             ReflectionInfo = null!
         };
 
@@ -136,7 +137,7 @@ internal static class DataGeneratorMetadataCreator
                 Name = "Discovery",
                 Type = typeof(object),
                 Namespace = string.Empty,
-                TypeReference = new TypeReference { AssemblyQualifiedName = typeof(object).AssemblyQualifiedName },
+                TypeInfo = new ConcreteType(typeof(object)),
                 Assembly = AssemblyMetadata.GetOrAdd("Discovery", () => new AssemblyMetadata { Name = "Discovery" }),
                 Parameters = [dummyParameter],
                 Properties = [],
@@ -144,9 +145,9 @@ internal static class DataGeneratorMetadataCreator
             }),
             Parameters = [],
             GenericTypeCount = 0,
-            ReturnTypeReference = new TypeReference { AssemblyQualifiedName = typeof(void).AssemblyQualifiedName },
+            ReturnTypeInfo = new ConcreteType(typeof(void)),
             ReturnType = typeof(void),
-            TypeReference = new TypeReference { AssemblyQualifiedName = typeof(object).AssemblyQualifiedName }
+            TypeInfo = new ConcreteType(typeof(object))
         };
 
         return new DataGeneratorMetadata
@@ -154,14 +155,15 @@ internal static class DataGeneratorMetadataCreator
             TestBuilderContext = new TestBuilderContextAccessor(new TestBuilderContext
             {
                 TestMetadata = discoveryMethodMetadata,
-                DataSourceAttribute = dataSource
+                DataSourceAttribute = dataSource,
             }),
             MembersToGenerate = [dummyParameter],
             TestInformation = discoveryMethodMetadata,
             Type = DataGeneratorType.ClassParameters,
             TestSessionId = "discovery",
             TestClassInstance = null,
-            ClassInstanceArguments = null
+            ClassInstanceArguments = null,
+            InstanceFactory = instanceFactory
         };
     }
 
@@ -170,22 +172,36 @@ internal static class DataGeneratorMetadataCreator
     /// </summary>
     public static DataGeneratorMetadata CreateForPropertyInjection(
         PropertyMetadata propertyMetadata,
-        MethodMetadata methodMetadata,
+        MethodMetadata? methodMetadata,
         IDataSourceAttribute dataSource,
+        string testSessionId,
         TestContext? testContext = null,
         object? testClassInstance = null,
         TestContextEvents? events = null,
-        Dictionary<string, object?>? objectBag = null)
+        ConcurrentDictionary<string, object?>? objectBag = null)
     {
-        var testBuilderContext = testContext != null
-            ? TestBuilderContext.FromTestContext(testContext, dataSource)
-            : new TestBuilderContext
+        TestBuilderContext testBuilderContext;
+        if (testContext != null)
+        {
+            testBuilderContext = TestBuilderContext.FromTestContext(testContext, dataSource);
+        }
+        else if (methodMetadata != null)
+        {
+            testBuilderContext = new TestBuilderContext
             {
                 Events = events ?? new TestContextEvents(),
                 TestMetadata = methodMetadata,
                 DataSourceAttribute = dataSource,
-                ObjectBag = objectBag ?? []
             };
+            if (objectBag != null)
+            {
+                testBuilderContext.StateBag = objectBag;
+            }
+        }
+        else
+        {
+            testBuilderContext = TestSessionContext.GlobalStaticPropertyContext;
+        }
 
         return new DataGeneratorMetadata
         {
@@ -193,25 +209,33 @@ internal static class DataGeneratorMetadataCreator
             MembersToGenerate = [propertyMetadata],
             TestInformation = methodMetadata,
             Type = DataGeneratorType.Property,
-            TestSessionId = TestSessionContext.Current?.Id ?? "property-injection",
-            TestClassInstance = testClassInstance ?? testContext?.TestDetails.ClassInstance,
-            ClassInstanceArguments = testContext?.TestDetails.TestClassArguments ?? []
+            TestSessionId = testSessionId,
+            TestClassInstance = testClassInstance ?? testContext?.Metadata.TestDetails.ClassInstance,
+            ClassInstanceArguments = testContext?.Metadata.TestDetails.TestClassArguments ?? []
         };
     }
 
     /// <summary>
     /// Creates DataGeneratorMetadata for property injection using PropertyInfo (reflection mode).
+    /// This method is only called in reflection mode, not in source-generated/AOT scenarios.
     /// </summary>
-    [UnconditionalSuppressMessage("Trimming", "IL2072:'value' argument does not satisfy 'DynamicallyAccessedMemberTypes' in call to 'TUnit.Core.PropertyMetadata.Type.init'", Justification = "Property types are resolved through reflection")]
+    #if NET8_0_OR_GREATER
+    [UnconditionalSuppressMessage("Trimming", "IL2026:Members annotated with 'RequiresUnreferencedCodeAttribute' require dynamic access",
+        Justification = "This method is only used in reflection mode. In AOT/source-gen mode, property injection uses compile-time generated PropertyMetadata.")]
+    [UnconditionalSuppressMessage("AOT", "IL3050:Calling members annotated with 'RequiresDynamicCodeAttribute' may break functionality when AOT compiling",
+        Justification = "This method is only used in reflection mode. In AOT/source-gen mode, property injection uses compile-time generated PropertyMetadata.")]
+    [UnconditionalSuppressMessage("Trimming", "IL2072:Target parameter argument does not satisfy \'DynamicallyAccessedMembersAttribute\' in call to target method. The return value of the source method does not have matching annotations.")]
+#endif
     public static DataGeneratorMetadata CreateForPropertyInjection(
         PropertyInfo property,
         Type containingType,
-        MethodMetadata methodMetadata,
+        MethodMetadata? methodMetadata,
         IDataSourceAttribute dataSource,
+        string testSessionId,
         TestContext? testContext = null,
         object? testClassInstance = null,
         TestContextEvents? events = null,
-        Dictionary<string, object?>? objectBag = null)
+        ConcurrentDictionary<string, object?>? objectBag = null)
     {
         var propertyMetadata = new PropertyMetadata
         {
@@ -228,6 +252,7 @@ internal static class DataGeneratorMetadataCreator
             propertyMetadata,
             methodMetadata,
             dataSource,
+            testSessionId,
             testContext,
             testClassInstance,
             events,
@@ -238,8 +263,8 @@ internal static class DataGeneratorMetadataCreator
     {
         if (parameters.Length > 0)
         {
-            var lastParam = parameters[parameters.Length - 1];
-            if (lastParam.Type == typeof(System.Threading.CancellationToken))
+            var lastParam = parameters[^1];
+            if (lastParam.Type == typeof(CancellationToken))
             {
                 var newArray = new ParameterMetadata[parameters.Length - 1];
                 Array.Copy(parameters, 0, newArray, 0, parameters.Length - 1);
@@ -249,9 +274,14 @@ internal static class DataGeneratorMetadataCreator
         return parameters;
     }
 
-    [UnconditionalSuppressMessage("Trimming", "IL2070:'this' argument does not satisfy 'DynamicallyAccessedMemberTypes.PublicConstructors' in call to 'System.Type.GetConstructors(BindingFlags)'", Justification = "Constructor discovery needed for metadata")]
-    [UnconditionalSuppressMessage("Trimming", "IL2067:'value' argument does not satisfy 'DynamicallyAccessedMemberTypes' in call to 'TUnit.Core.ClassMetadata.Type.init'", Justification = "Type annotations are handled by reflection")]
-    [UnconditionalSuppressMessage("Trimming", "IL2072:'Type' argument does not satisfy 'DynamicallyAccessedMemberTypes' in call to 'TUnit.Core.ParameterMetadata.ParameterMetadata(Type)'", Justification = "Parameter types are known through reflection")]
+    #if NET8_0_OR_GREATER
+    [UnconditionalSuppressMessage("Trimming", "IL2026:Members annotated with 'RequiresUnreferencedCodeAttribute' require dynamic access",
+        Justification = "This helper is only used in reflection mode. In AOT/source-gen mode, class metadata is generated at compile time.")]
+    [UnconditionalSuppressMessage("Trimming", "IL2070:Target method return value does not satisfy 'DynamicallyAccessedMembersAttribute'",
+        Justification = "This helper is only used in reflection mode. In AOT/source-gen mode, class metadata is generated at compile time.")]
+    [UnconditionalSuppressMessage("Trimming", "IL2072:Target parameter argument does not satisfy \'DynamicallyAccessedMembersAttribute\' in call to target method. The return value of the source method does not have matching annotations.")]
+    [UnconditionalSuppressMessage("Trimming", "IL2067:Target parameter argument does not satisfy \'DynamicallyAccessedMembersAttribute\' in call to target method. The parameter of method does not have matching annotations.")]
+#endif
     private static ClassMetadata GetClassMetadataForType(Type type)
     {
         return ClassMetadata.GetOrAdd(type.FullName ?? type.Name, () =>
@@ -262,14 +292,14 @@ internal static class DataGeneratorMetadataCreator
             var constructorParameters = constructor?.GetParameters().Select((p, i) => new ParameterMetadata(p.ParameterType)
             {
                 Name = p.Name ?? $"param{i}",
-                TypeReference = new TypeReference { AssemblyQualifiedName = p.ParameterType.AssemblyQualifiedName },
+                TypeInfo = new ConcreteType(p.ParameterType),
                 ReflectionInfo = p
-            }).ToArray() ?? Array.Empty<ParameterMetadata>();
+            }).ToArray() ?? [];
 
             return new ClassMetadata
             {
                 Type = type,
-                TypeReference = TypeReference.CreateConcrete(type.AssemblyQualifiedName ?? type.FullName ?? type.Name),
+                TypeInfo = new ConcreteType(type),
                 Name = type.Name,
                 Namespace = type.Namespace ?? string.Empty,
                 Assembly = AssemblyMetadata.GetOrAdd(type.Assembly.GetName().Name ?? type.Assembly.GetName().FullName ?? "Unknown", () => new AssemblyMetadata

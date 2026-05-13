@@ -27,7 +27,7 @@ public class TestApp : IAsyncInitializer, IAsyncDisposable
     private WebApplicationFactory<Program>? _factory;
     
     // This property will be initialized before InitializeAsync is called
-    [DataSourceGeneratorProperty<RedisFixture>]
+    [ClassDataSource<RedisFixture>]
     public required RedisFixture Redis { get; init; }
     
     public HttpClient Client { get; private set; } = null!;
@@ -56,22 +56,11 @@ public class TestApp : IAsyncInitializer, IAsyncDisposable
     }
 }
 
-// Step 3: Create a data source attribute
-[SharedType(SharedType.PerClass)] // Share the expensive resources per test class
-public class TestAppAttribute : DataSourceGeneratorAttribute<TestApp>
-{
-    public override IEnumerable<TestApp> GenerateDataSources(DataGeneratorMetadata metadata)
-    {
-        yield return new TestApp();
-    }
-}
-
-// Step 4: Use in tests
-[TestClass]
+// Step 3: Use in tests
 public class ApiIntegrationTests
 {
     [Test]
-    [TestApp]
+    [ClassDataSource<TestApp>(Shared = SharedType.PerClass)] // Share the expensive resources per test class
     public async Task Get_Users_Returns_Cached_Data(TestApp app)
     {
         // Both Redis and WebApp are initialized and ready to use
@@ -90,13 +79,13 @@ public class FullTestApp : IAsyncInitializer, IAsyncDisposable
     private WebApplicationFactory<Program>? _factory;
     
     // All these will be initialized before InitializeAsync
-    [DataSourceGeneratorProperty<RedisFixture>]
+    [ClassDataSource<RedisFixture>]
     public required RedisFixture Redis { get; init; }
     
-    [DataSourceGeneratorProperty<PostgresFixture>]
+    [ClassDataSource<PostgresFixture>]
     public required PostgresFixture Postgres { get; init; }
     
-    [DataSourceGeneratorProperty<RabbitMqFixture>]
+    [ClassDataSource<RabbitMqFixture>]
     public required RabbitMqFixture RabbitMq { get; init; }
     
     public HttpClient Client { get; private set; } = null!;
@@ -139,7 +128,7 @@ public class FullTestApp : IAsyncInitializer, IAsyncDisposable
 
 ## Key Points
 
-✅ **Automatic Initialization**: Properties marked with `[DataSourceGeneratorProperty]` are initialized before `InitializeAsync` is called
+✅ **Automatic Initialization**: Properties marked with data source attributes (like `[ClassDataSource<T>]`) are initialized before `InitializeAsync` is called
 
 ✅ **Proper Order**: TUnit handles the dependency graph and initializes in the correct order
 

@@ -70,7 +70,7 @@ public sealed class VerifySettingsTask
     {
         // Scrub Windows-style paths (e.g., C:\Users\... or D:\git\TUnit\)
         ScrubLinesWithReplace(line => System.Text.RegularExpressions.Regex.Replace(line,
-            @"[A-Za-z]:\\\\[^""\s,)]+",
+            @"[A-Za-z]:\\[^""\s,)]+",
             "PATH_SCRUBBED"));
 
         // Scrub Unix-style paths (e.g., /home/user/... or /var/lib/...)
@@ -88,8 +88,8 @@ public sealed class VerifySettingsTask
 
         if (testContext != null)
         {
-            testClassName = testContext.TestDetails.ClassType.Name;
-            testName = testContext.TestDetails.TestName;
+            testClassName = testContext.Metadata.TestDetails.ClassType.Name;
+            testName = testContext.Metadata.TestDetails.TestName;
         }
         else
         {
@@ -157,15 +157,15 @@ public sealed class VerifySettingsTask
 
         if (!File.Exists(_verifiedPath))
         {
-            await FilePolyfill.WriteAllTextAsync(_receivedPath, NormalizeNewline(final));
+            await File.WriteAllTextAsync(_receivedPath, NormalizeNewline(final));
             throw new InvalidOperationException($"No verified file found for '{name}'.");
         }
 
-        var approved = await FilePolyfill.ReadAllTextAsync(_verifiedPath);
+        var approved = await File.ReadAllTextAsync(_verifiedPath);
 
         if (!string.Equals(NormalizeNewline(final), NormalizeNewline(approved), StringComparison.Ordinal))
         {
-            await FilePolyfill.WriteAllTextAsync(_receivedPath, NormalizeNewline(final));
+            await File.WriteAllTextAsync(_receivedPath, NormalizeNewline(final));
 
             if (_onVerifyMismatch != null)
             {

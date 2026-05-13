@@ -1,5 +1,7 @@
 ﻿#pragma warning disable
 
+using TUnit.Assertions.Extensions;
+
 namespace TUnit.Assertions.Tests.Old;
 
 public class EqualityComparerTests
@@ -17,6 +19,7 @@ public class EqualityComparerTests
     {
         const double a = 10;
         const double b = 0;
+        // With IEqualityComparer support restored, we can use it directly
         await TUnitAssert.That(a).IsEqualTo(b, new Comparer());
     }
 
@@ -25,6 +28,6 @@ public class EqualityComparerTests
     {
         const double a = 10;
         const double b = 0;
-        await TUnitAssert.That(new Comparer().Equals(a, b)).IsTrue();
+        await TUnitAssert.That(a).IsEqualTo(b, new Comparer());
     }
 }

@@ -8,6 +8,7 @@ public static class WellKnown
         public static readonly FullyQualifiedTypeName Explicit = GetTypeName("ExplicitAttribute");
         public static readonly FullyQualifiedTypeName Matrix = GetTypeName("MatrixAttribute");
         public static readonly FullyQualifiedTypeName MatrixDataSourceAttribute = GetTypeName("MatrixDataSourceAttribute");
+        public static readonly FullyQualifiedTypeName CombinedDataSourceAttribute = GetTypeName("CombinedDataSourcesAttribute");
 
         public static readonly FullyQualifiedTypeName BeforeAttribute = GetTypeName("BeforeAttribute");
         public static readonly FullyQualifiedTypeName AfterAttribute = GetTypeName("AfterAttribute");
@@ -19,6 +20,7 @@ public static class WellKnown
         public static readonly FullyQualifiedTypeName Arguments = GetTypeName("ArgumentsAttribute");
         public static readonly FullyQualifiedTypeName MethodDataSource = GetTypeName("MethodDataSourceAttribute");
         public static readonly FullyQualifiedTypeName GenericMethodDataSource = GetTypeName("MethodDataSourceAttribute`1");
+        public static readonly FullyQualifiedTypeName InstanceMethodDataSource = GetTypeName("InstanceMethodDataSourceAttribute");
         public static readonly FullyQualifiedTypeName ClassDataSource = GetTypeName("ClassDataSourceAttribute");
         public static readonly FullyQualifiedTypeName ClassConstructor = GetTypeName("ClassConstructorAttribute");
 
@@ -35,6 +37,7 @@ public static class WellKnown
         public static readonly FullyQualifiedTypeName DependsOnAttribute = GetTypeName("DependsOnAttribute");
 
         public static readonly FullyQualifiedTypeName IDataSourceAttribute = GetTypeName("IDataSourceAttribute");
+        public static readonly FullyQualifiedTypeName ITypedDataSourceAttribute = GetTypeName("ITypedDataSourceAttribute");
         public static readonly FullyQualifiedTypeName IAsyncUntypedDataSourceGeneratorAttribute = GetTypeName("IAsyncUntypedDataSourceGeneratorAttribute");
 
         public static readonly FullyQualifiedTypeName CancellationToken = new("System.Threading.CancellationToken");

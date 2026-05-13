@@ -1,25 +1,35 @@
 using TUnit.Core.Helpers;
 using TUnit.Core.Interfaces;
+using TUnit.Core.Settings;
 
 namespace TUnit.Core;
 
 public class DedicatedThreadExecutor : GenericAbstractExecutor, ITestRegisteredEventReceiver
 {
-    protected sealed override async ValueTask ExecuteAsync(Func<ValueTask> action)
+    protected sealed override ValueTask ExecuteAsync(Func<ValueTask> action)
     {
+        // On browser platforms, threading is not supported, so fall back to direct execution
+#if NET5_0_OR_GREATER
+        if (OperatingSystem.IsBrowser())
+        {
+            return action();
+        }
+#endif
+
         var tcs = new TaskCompletionSource<object?>();
 
-        var thread = new Thread(() =>
+        var thread = new Thread(static state =>
         {
+            var (threadExecutor, action, tcs) = (ValueTuple<DedicatedThreadExecutor, Func<ValueTask>, TaskCompletionSource<object?>>)state!;
             Exception? capturedException = null;
 
             try
             {
-                Initialize();
+                threadExecutor.Initialize();
 
                 try
                 {
-                    ExecuteAsyncActionWithMessagePump(action, tcs);
+                    threadExecutor.ExecuteAsyncActionWithMessagePump(action, tcs);
                 }
                 catch (Exception e)
                 {
@@ -32,7 +42,7 @@ public class DedicatedThreadExecutor : GenericAbstractExecutor, ITestRegisteredE
             }
             finally
             {
-                CleanUp();
+                threadExecutor.CleanUp();
 
                 if (capturedException != null && !tcs.Task.IsCompleted)
                 {
@@ -41,10 +51,12 @@ public class DedicatedThreadExecutor : GenericAbstractExecutor, ITestRegisteredE
             }
         });
 
-        ConfigureThread(thread);
-        thread.Start();
+        var state = (this, action, tcs);
 
-        await tcs.Task;
+        ConfigureThread(thread);
+        thread.Start(state);
+
+        return new ValueTask(tcs.Task);
     }
 
     private void ExecuteAsyncActionWithMessagePump(Func<ValueTask> action, TaskCompletionSource<object?> tcs)
@@ -52,60 +64,127 @@ public class DedicatedThreadExecutor : GenericAbstractExecutor, ITestRegisteredE
         try
         {
             var previousContext = SynchronizationContext.Current;
-            var taskScheduler = new DedicatedThreadTaskScheduler(Thread.CurrentThread);
-            var dedicatedContext = new DedicatedThreadSynchronizationContext(taskScheduler);
+            ManualResetEventSlim? workAvailableEvent = null;
+#if NET5_0_OR_GREATER
+            if (!OperatingSystem.IsBrowser())
+            {
+                workAvailableEvent = new ManualResetEventSlim(false);
+            }
+#else
+            workAvailableEvent = new ManualResetEventSlim(false);
+#endif
+            var taskScheduler = new DedicatedThreadTaskScheduler(Thread.CurrentThread, workAvailableEvent);
+            var dedicatedContext = new DedicatedThreadSynchronizationContext(workAvailableEvent);
 
             SynchronizationContext.SetSynchronizationContext(dedicatedContext);
 
             try
             {
-                var task = Task.Factory.StartNew(async () =>
+                var task = Task.Factory.StartNew(
+                    static action => ((Func<ValueTask>)action!)().AsTask(),
+                    action, CancellationToken.None, TaskCreationOptions.None, taskScheduler)
+                    .Unwrap();
+
+                // Try fast path first - many tests complete quickly
+                // Use IsCompleted to avoid synchronous wait
+                if (task.IsCompleted)
                 {
-                    // Inside this task, TaskScheduler.Current will be our scheduler
-                    await action();
-                }, CancellationToken.None, TaskCreationOptions.None, taskScheduler).Unwrap();
-
-                // Pump messages until the task completes
-                var deadline = DateTime.UtcNow.AddMinutes(5);
-
-                while (!task.IsCompleted && DateTime.UtcNow < deadline)
-                {
-                    dedicatedContext.ProcessPendingWork();
-
-                    taskScheduler.ProcessPendingTasks();
-
-                    Thread.Sleep(1);
-                }
-
-                if (!task.IsCompleted)
-                {
-                    tcs.SetException(new TimeoutException("Async operation timed out after 5 minutes"));
+                    HandleTaskCompletion(task, tcs);
                     return;
                 }
 
-                if (task.IsFaulted)
+                // Pump messages until the task completes with event-driven signaling
+                var deadline = DateTime.UtcNow.AddMinutes(5);
+                var spinWait = new SpinWait();
+                const int MaxSpinCount = 50;
+                const int WaitTimeoutMs = 100;
+
+                while (!task.IsCompleted)
                 {
-                    tcs.SetException(task.Exception!.InnerExceptions.Count == 1 
-                        ? task.Exception.InnerException! 
-                        : task.Exception);
+                    var hadWork = dedicatedContext.ProcessPendingWork();
+                    hadWork |= taskScheduler.ProcessPendingTasks();
+
+                    if (!hadWork)
+                    {
+                        // Fast path: spin briefly for immediate continuations
+                        if (spinWait.Count < MaxSpinCount)
+                        {
+                            spinWait.SpinOnce();
+                        }
+                        else
+                        {
+#if NET5_0_OR_GREATER
+                            if (workAvailableEvent != null && !OperatingSystem.IsBrowser())
+                            {
+                                // No work after spinning - use event-driven wait (eliminates Thread.Sleep)
+                                // Thread blocks efficiently in kernel, wakes instantly when work queued
+                                workAvailableEvent.Wait(WaitTimeoutMs);
+                                workAvailableEvent.Reset();
+                                spinWait.Reset();
+                            }
+                            else
+                            {
+                                // Fallback for browser or null event
+                                Thread.Yield();
+                                spinWait.Reset();
+                            }
+#else
+                            if (workAvailableEvent != null)
+                            {
+                                workAvailableEvent.Wait(WaitTimeoutMs);
+                                workAvailableEvent.Reset();
+                                spinWait.Reset();
+                            }
+                            else
+                            {
+                                Thread.Yield();
+                                spinWait.Reset();
+                            }
+#endif
+                            // Check timeout after waiting
+                            if (DateTime.UtcNow >= deadline)
+                            {
+                                tcs.SetException(new TimeoutException("Async operation timed out after 5 minutes"));
+                                return;
+                            }
+                        }
+                    }
+                    else
+                    {
+                        // Had work, reset spin counter
+                        spinWait.Reset();
+                    }
                 }
-                else if (task.IsCanceled)
-                {
-                    tcs.SetCanceled();
-                }
-                else
-                {
-                    tcs.SetResult(null);
-                }
+
+                HandleTaskCompletion(task, tcs);
             }
             finally
             {
+                workAvailableEvent?.Dispose();
                 SynchronizationContext.SetSynchronizationContext(previousContext);
             }
         }
         catch (Exception ex)
         {
             tcs.SetException(ex);
+        }
+    }
+
+    private static void HandleTaskCompletion(Task task, TaskCompletionSource<object?> tcs)
+    {
+        if (task.IsFaulted)
+        {
+            tcs.SetException(task.Exception!.InnerExceptions.Count == 1
+                ? task.Exception.InnerException!
+                : task.Exception);
+        }
+        else if (task.IsCanceled)
+        {
+            tcs.SetCanceled();
+        }
+        else
+        {
+            tcs.SetResult(null);
         }
     }
 
@@ -124,14 +203,16 @@ public class DedicatedThreadExecutor : GenericAbstractExecutor, ITestRegisteredE
     internal sealed class DedicatedThreadTaskScheduler : TaskScheduler
     {
         private readonly Thread _dedicatedThread;
+        private readonly ManualResetEventSlim? _workAvailableEvent;
+        private readonly Lock _queueLock = new();
         private readonly List<Task> _taskQueue =
         [
         ];
-        private readonly Lock _queueLock = new();
 
-        public DedicatedThreadTaskScheduler(Thread dedicatedThread)
+        public DedicatedThreadTaskScheduler(Thread dedicatedThread, ManualResetEventSlim? workAvailableEvent)
         {
             _dedicatedThread = dedicatedThread;
+            _workAvailableEvent = workAvailableEvent;
         }
 
         protected override void QueueTask(Task task)
@@ -140,6 +221,8 @@ public class DedicatedThreadExecutor : GenericAbstractExecutor, ITestRegisteredE
             {
                 _taskQueue.Add(task);
             }
+            // Signal that work is available (wake message pump immediately)
+            _workAvailableEvent?.Set();
         }
 
         protected override bool TryExecuteTaskInline(Task task, bool taskWasPreviouslyQueued)
@@ -178,13 +261,14 @@ public class DedicatedThreadExecutor : GenericAbstractExecutor, ITestRegisteredE
             }
         }
 
-        public void ProcessPendingTasks()
+        public bool ProcessPendingTasks()
         {
             if (Thread.CurrentThread != _dedicatedThread)
             {
                 throw new InvalidOperationException("ProcessPendingTasks can only be called from the dedicated thread.");
             }
 
+            var hadWork = false;
             while (true)
             {
                 Task? task;
@@ -198,10 +282,12 @@ public class DedicatedThreadExecutor : GenericAbstractExecutor, ITestRegisteredE
 
                     task = _taskQueue[0];
                     _taskQueue.RemoveAt(0);
+                    hadWork = true;
                 }
 
                 TryExecuteTask(task);
             }
+            return hadWork;
         }
 
         public override int MaximumConcurrencyLevel => 1;
@@ -209,15 +295,15 @@ public class DedicatedThreadExecutor : GenericAbstractExecutor, ITestRegisteredE
 
     internal sealed class DedicatedThreadSynchronizationContext : SynchronizationContext
     {
+        private Queue<(SendOrPostCallback callback, object? state)>? _workQueue = null;
         private readonly Thread _dedicatedThread;
-        private readonly DedicatedThreadTaskScheduler _taskScheduler;
-        private readonly Queue<(SendOrPostCallback callback, object? state)> _workQueue = new();
+        private readonly ManualResetEventSlim? _workAvailableEvent;
         private readonly Lock _queueLock = new();
 
-        public DedicatedThreadSynchronizationContext(DedicatedThreadTaskScheduler taskScheduler)
+        public DedicatedThreadSynchronizationContext(ManualResetEventSlim? workAvailableEvent)
         {
             _dedicatedThread = Thread.CurrentThread;
-            _taskScheduler = taskScheduler;
+            _workAvailableEvent = workAvailableEvent;
         }
 
         public override void Post(SendOrPostCallback d, object? state)
@@ -225,8 +311,11 @@ public class DedicatedThreadExecutor : GenericAbstractExecutor, ITestRegisteredE
             // Always queue the work to ensure it runs on the dedicated thread
             lock (_queueLock)
             {
+                _workQueue ??= new();
                 _workQueue.Enqueue((d, state));
             }
+            // Signal that work is available (wake message pump immediately)
+            _workAvailableEvent?.Set();
         }
 
         public override void Send(SendOrPostCallback d, object? state)
@@ -239,8 +328,8 @@ public class DedicatedThreadExecutor : GenericAbstractExecutor, ITestRegisteredE
             else
             {
                 // For Send, we need to block until completion
-                // This is less ideal but necessary for the Send semantics
-                var tcs = new TaskCompletionSource<object?>();
+                // Use Task.Run to avoid potential deadlocks by ensuring we don't capture any synchronization context
+                var tcs = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
 
                 Post(_ =>
                 {
@@ -255,31 +344,56 @@ public class DedicatedThreadExecutor : GenericAbstractExecutor, ITestRegisteredE
                     }
                 }, null);
 
-                // Wait for completion (this will block)
-                tcs.Task.GetAwaiter().GetResult();
+                // Use a more robust synchronous wait pattern to avoid deadlocks
+                // We use Task.Run to ensure we don't capture the current SynchronizationContext
+                // which is a common cause of deadlocks
+                var timeout = TUnitSettings.Default.Timeouts.DefaultTestTimeout;
+                var waitTask = Task.Run(async () =>
+                {
+                    // For .NET Standard 2.0 compatibility, use Task.Delay for timeout
+                    var timeoutTask = Task.Delay(timeout);
+                    var completedTask = await Task.WhenAny(tcs.Task, timeoutTask).ConfigureAwait(false);
+
+                    if (completedTask == timeoutTask)
+                    {
+                        throw new TimeoutException($"Synchronous operation on dedicated thread timed out after {timeout.TotalMinutes} minutes");
+                    }
+
+                    // Await the actual task to get its result or exception
+                    await tcs.Task.ConfigureAwait(false);
+                });
+
+                // This blocking wait is intentional and safe from deadlocks because:
+                // 1. We verified above that the current thread is NOT the dedicated thread
+                // 2. The work is posted to the dedicated thread's queue via Post()
+                // 3. waitTask runs via Task.Run without a SynchronizationContext, so no context capture
+                // 4. SynchronizationContext.Send is synchronous by API contract — blocking is required
+                waitTask.GetAwaiter().GetResult();
             }
         }
 
-        public void ProcessPendingWork()
+        public bool ProcessPendingWork()
         {
             // Only the dedicated thread should call this
             if (Thread.CurrentThread != _dedicatedThread)
             {
-                return;
+                return false;
             }
 
+            var hadWork = false;
             while (true)
             {
                 (SendOrPostCallback callback, object? state) workItem;
 
                 lock (_queueLock)
                 {
-                    if (_workQueue.Count == 0)
+                    if (_workQueue == null || _workQueue.Count == 0)
                     {
                         break;
                     }
 
                     workItem = _workQueue.Dequeue();
+                    hadWork = true;
                 }
 
                 try
@@ -292,6 +406,7 @@ public class DedicatedThreadExecutor : GenericAbstractExecutor, ITestRegisteredE
                     // The exception will be handled by the async machinery
                 }
             }
+            return hadWork;
         }
 
         public override SynchronizationContext CreateCopy()

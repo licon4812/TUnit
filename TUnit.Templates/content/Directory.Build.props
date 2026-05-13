@@ -1,7 +1,53 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Project>
+    <!-- TUnit-family package version policy (see #5709):
+         All TUnit-owned packages referenced by templates (TUnit, TUnit.Aspire, TUnit.Playwright,
+         TUnit.Assertions.FSharp) MUST use Version="1.*" floating-range pinning in their template
+         .csproj/.fsproj/.vbproj files. This:
+           - eliminates Renovate maintenance PRs against template content, and
+           - ensures freshly-scaffolded projects always restore the latest published version.
+         Do NOT re-pin these packages to specific versions. Third-party packages should continue
+         to use exact versions as normal. -->
+
+    <PropertyGroup Condition="'$(MSBuildProjectExtension)' == '.fsproj'">
+        <!-- TUnit.Assertions.props auto-adds TUnit.Assertions.FSharp for F# projects;
+             template fsproj files also include it explicitly with a pinned version -->
+        <NoWarn>$(NoWarn);NU1504</NoWarn>
+    </PropertyGroup>
+
     <ItemGroup Condition="$(MSBuildProjectName.Contains('TestProject'))">
         <Using Include="TUnit.Core.HookType" Static="True" />
         <Using Include="TUnit.Core" />
     </ItemGroup>
+
+    <!-- During solution builds, swap TUnit.Aspire NuGet package for local project reference
+         (TUnit.Aspire is not yet published to NuGet). This file is excluded from the template package.
+         We also add implicit usings that would normally come from TUnit's NuGet props/targets. -->
+    <ItemGroup Condition="$(MSBuildProjectDirectory.Contains('TUnit.Aspire.Test'))">
+        <PackageReference Remove="TUnit.Aspire" />
+        <ProjectReference Include="$(MSBuildThisFileDirectory)..\..\TUnit.Aspire\TUnit.Aspire.csproj" />
+        <Using Include="TUnit.Assertions" />
+        <Using Include="TUnit.Assertions.Extensions" />
+    </ItemGroup>
+
+    <ItemGroup Condition="'$(MSBuildProjectName)' == 'ExampleNamespace.TestProject' And $(MSBuildProjectDirectory.Contains('TUnit.Aspire.Starter'))">
+        <PackageReference Remove="TUnit.Aspire" />
+        <ProjectReference Include="$(MSBuildThisFileDirectory)..\..\TUnit.Aspire\TUnit.Aspire.csproj" />
+        <Using Include="TUnit.Assertions" />
+        <Using Include="TUnit.Assertions.Extensions" />
+    </ItemGroup>
+
+    <!-- During solution builds, swap TUnit.Playwright NuGet package for local project reference
+         so newly-added API in the same PR is visible to the template smoke test. End-user
+         template instantiations match a different MSBuild path and keep the PackageReference.
+         Also import TUnit.props directly — NuGet auto-imports build/TUnit.props for package
+         consumers, but ProjectReference doesn't propagate it; without this the project compiles
+         but `dotnet run` fails with "test framework adapter has not been registered". -->
+    <Import Project="$(MSBuildThisFileDirectory)..\..\TUnit\TUnit.props"
+            Condition="$(MSBuildProjectDirectory.Contains('TUnit.Templates')) And $(MSBuildProjectDirectory.Contains('TUnit.Playwright'))" />
+    <ItemGroup Condition="$(MSBuildProjectDirectory.Contains('TUnit.Templates')) And $(MSBuildProjectDirectory.Contains('TUnit.Playwright'))">
+        <PackageReference Remove="TUnit.Playwright" />
+        <ProjectReference Include="$(MSBuildThisFileDirectory)..\..\TUnit.Playwright\TUnit.Playwright.csproj" />
+    </ItemGroup>
 </Project>
+

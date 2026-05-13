@@ -1,7 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Project>
   <PropertyGroup Condition="'$(TargetFramework)' == '' and '$(TargetFrameworks)' == ''">
-    <TargetFrameworks>net8.0;net9.0</TargetFrameworks>
+    <TargetFrameworks>net8.0;net9.0;net10.0</TargetFrameworks>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(MSBuildProjectName)' == 'TUnit.Pipeline'">
+    <TargetFrameworks>net10.0</TargetFrameworks>
   </PropertyGroup>
 
   <PropertyGroup>
@@ -10,26 +14,38 @@
   </PropertyGroup>
 
   <PropertyGroup>
+    <!-- Disable GitVersion MSBuild task by default - CI computes version once and passes properties explicitly.
+         This prevents GitVersion from spawning a process per project×TFM (153+ invocations). -->
+    <DisableGitVersionTask>true</DisableGitVersionTask>
+    <GenerateGitVersionInformation>false</GenerateGitVersionInformation>
+    <!-- Re-enable GitVersion for core library projects when building locally, so that
+         strong-named assembly versions match what NuGet packages (e.g. Verify.TUnit) expect. -->
+    <_EnableLocalGitVersion Condition="'$(GITHUB_ACTIONS)' != 'true' and (
+        '$(MSBuildProjectName)' == 'TUnit.Core' or
+        '$(MSBuildProjectName)' == 'TUnit.Engine' or
+        '$(MSBuildProjectName)' == 'TUnit.Mocks' or
+        '$(MSBuildProjectName)' == 'TUnit.Assertions'
+    )">true</_EnableLocalGitVersion>
+    <DisableGitVersionTask Condition="'$(_EnableLocalGitVersion)' == 'true'">false</DisableGitVersionTask>
+    <GenerateGitVersionInformation Condition="'$(_EnableLocalGitVersion)' == 'true'">true</GenerateGitVersionInformation>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <LangVersion>preview</LangVersion>
+
     <TrimmerSingleWarn>false</TrimmerSingleWarn>
     <NoWarn>NU1507;NU1903;CS9107</NoWarn>
     <BuildTransitivePath>buildTransitive/$(TargetFramework)/</BuildTransitivePath>
     <BuildPath>build/netstandard2.0</BuildPath>
   </PropertyGroup>
 
-  <PropertyGroup Condition="$(MSBuildProjectName.StartsWith('TUnit.Analyzers.Roslyn'))">
+  <!-- Shared properties for all Roslyn-versioned variant projects (e.g. TUnit.Analyzers.Roslyn44) -->
+  <PropertyGroup Condition="$(MSBuildProjectName.Contains('.Roslyn'))">
+    <_BaseProjectName>$([System.Text.RegularExpressions.Regex]::Replace($(MSBuildProjectName), '\.Roslyn\d+$', ''))</_BaseProjectName>
+    <_RoslynDigits>$([System.Text.RegularExpressions.Regex]::Match($(MSBuildProjectName), 'Roslyn(\d+)$').Groups[1].Value)</_RoslynDigits>
+    <RoslynVersion>$([System.Text.RegularExpressions.Regex]::Replace($(_RoslynDigits), '^(\d)', '$1.'))</RoslynVersion>
     <TargetFrameworks>netstandard2.0</TargetFrameworks>
-    <AssemblyName>TUnit.Analyzers</AssemblyName>
-    <RootNamespace>TUnit.Analyzers</RootNamespace>
-    <IsPackable>false</IsPackable>
-    <EnforceExtendedAnalyzerRules>true</EnforceExtendedAnalyzerRules>
-  </PropertyGroup>
-  <PropertyGroup Condition="$(MSBuildProjectName.StartsWith('TUnit.Core.SourceGenerator.Roslyn'))">
-    <TargetFrameworks>netstandard2.0</TargetFrameworks>
-    <AssemblyName>TUnit.Core.SourceGenerator</AssemblyName>
-    <RootNamespace>TUnit.Core.SourceGenerator</RootNamespace>
+    <AssemblyName>$(_BaseProjectName)</AssemblyName>
+    <RootNamespace>$(_BaseProjectName)</RootNamespace>
     <IsPackable>false</IsPackable>
     <EnforceExtendedAnalyzerRules>true</EnforceExtendedAnalyzerRules>
   </PropertyGroup>
@@ -67,6 +83,30 @@
   <ItemGroup>
     <None Include="$(MSBuildThisFileDirectory)README.md" Pack="true" PackagePath="\" />
     <None Include="$(MSBuildThisFileDirectory)assets/logo.jpg" Pack="true" PackagePath="\" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <PolyUseEmbeddedAttribute>true</PolyUseEmbeddedAttribute>
+  </PropertyGroup>
+
+  <!-- Include Polyfill for all target frameworks in internal projects -->
+  <ItemGroup>
+    <PackageReference Include="Polyfill">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+  </ItemGroup>
+
+  <!-- GitVersion only needed by the 4 core library projects that produce versioned NuGet packages -->
+  <ItemGroup Condition="
+      '$(MSBuildProjectName)' == 'TUnit.Core' or
+      '$(MSBuildProjectName)' == 'TUnit.Engine' or
+      '$(MSBuildProjectName)' == 'TUnit.Mocks' or
+      '$(MSBuildProjectName)' == 'TUnit.Assertions'">
+    <PackageReference Include="GitVersion.MsBuild">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers</IncludeAssets>
+    </PackageReference>
   </ItemGroup>
 
 </Project>

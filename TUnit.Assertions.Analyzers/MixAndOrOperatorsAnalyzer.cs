@@ -7,8 +7,9 @@ using TUnit.Assertions.Analyzers.Extensions;
 namespace TUnit.Assertions.Analyzers;
 
 /// <summary>
-/// A sample analyzer that reports the company name being used in class declarations.
-/// Traverses through the Syntax Tree and checks the name (identifier) of each class node.
+/// Reports awaited assertion chains that mix <c>.And</c> and <c>.Or</c> combinators without
+/// explicit grouping — the runtime throws <c>MixedAndOrAssertionsException</c>, this surfaces it
+/// at compile time. Covers both <c>Assert.That</c> and <c>value.Should()</c> entry points.
 /// </summary>
 [DiagnosticAnalyzer(LanguageNames.CSharp)]
 public class MixAndOrOperatorsAnalyzer : ConcurrentDiagnosticAnalyzer
@@ -28,8 +29,16 @@ public class MixAndOrOperatorsAnalyzer : ConcurrentDiagnosticAnalyzer
             return;
         }
 
-        if (awaitOperation.Operation.Type?.AllInterfaces.Any(x => x.GloballyQualifiedNonGeneric()
-        is "global::TUnit.Assertions.AssertionBuilders.IInvokableAssertionBuilder") != true)
+        // Check if the awaited type implements IAssertionSource<T>/IShouldSource<T> or
+        // inherits from Assertion<T>. ShouldAssertion<T> is covered by the IShouldSource branch
+        // (it implements that interface), so it doesn't need a separate base-type check.
+        var awaitedType = awaitOperation.Operation.Type;
+        var isAssertionSource = awaitedType?.AllInterfaces.Any(x =>
+            x.GloballyQualifiedNonGeneric() is "global::TUnit.Assertions.Core.IAssertionSource"
+                                            or "global::TUnit.Assertions.Should.Core.IShouldSource") == true;
+        var isAssertion = awaitedType?.BaseType != null && IsAssertionType(awaitedType.BaseType);
+
+        if (!isAssertionSource && !isAssertion)
         {
             return;
         }
@@ -41,5 +50,22 @@ public class MixAndOrOperatorsAnalyzer : ConcurrentDiagnosticAnalyzer
         {
             context.ReportDiagnostic(Diagnostic.Create(Rules.MixAndOrConditionsAssertion, awaitOperation?.Syntax.GetLocation()));
         }
+    }
+
+    private static bool IsAssertionType(INamedTypeSymbol? type)
+    {
+        if (type == null)
+        {
+            return false;
+        }
+
+        // Check if this type is Assertion<T>
+        if (type.GloballyQualifiedNonGeneric() is "global::TUnit.Assertions.Core.Assertion")
+        {
+            return true;
+        }
+
+        // Check base type recursively
+        return IsAssertionType(type.BaseType);
     }
 }

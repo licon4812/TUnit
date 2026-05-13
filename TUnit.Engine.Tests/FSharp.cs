@@ -1,6 +1,7 @@
 ﻿using CliWrap;
 using CliWrap.Buffered;
 using Shouldly;
+using TUnit.Engine.Tests.Enums;
 
 namespace TUnit.Engine.Tests;
 
@@ -19,13 +20,13 @@ public class FSharp
                 [
                     "run",
                     "--no-build",
-                    "-f", "net9.0",
+                    "-f", "net10.0",
                     "--configuration", "Release",
                     "--report-trx", "--report-trx-filename", trxFilename,
                     "--diagnostic-verbosity", "Debug",
-                    "--diagnostic", "--diagnostic-output-fileprefix", $"log_{GetType().Name}_",
+                    "--diagnostic", "--diagnostic-file-prefix", $"log_{GetType().Name}_",
                     "--timeout", "5m",
-                    // "--hangdump", "--hangdump-filename", $"hangdump.tests-{guid}.txt", "--hangdump-timeout", "3m",
+                    // "--hangdump", "--hangdump-filename", $"hangdump.tests-{guid}.dmp", "--hangdump-timeout", "3m",
 
                     ..runOptions.AdditionalArguments
                 ]
@@ -35,7 +36,7 @@ public class FSharp
 
         var result = await command.ExecuteBufferedAsync();
 
-        await TrxAsserter.AssertTrx(command, result,
+        await TrxAsserter.AssertTrx(TestMode.Reflection, command, result,
 
             [
                 result => result.ResultSummary.Outcome.ShouldBe("Completed"),

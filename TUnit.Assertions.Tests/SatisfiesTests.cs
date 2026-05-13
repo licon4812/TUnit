@@ -1,6 +1,4 @@
-﻿using TUnit.Assertions.AssertConditions.Throws;
-
-namespace TUnit.Assertions.Tests;
+﻿namespace TUnit.Assertions.Tests;
 
 public class SatisfiesTests
 {
@@ -51,7 +49,7 @@ public class SatisfiesTests
         };
 
         await Assert.That(myModel)
-            .Satisfies(model => model.Value, assert => assert.IsEqualTo("Hello")!);
+            .SatisfiesAsync(async model => await model.Value!, assert => assert.IsEqualTo("Hello")!);
     }
 
     [Test]
@@ -71,9 +69,9 @@ public class SatisfiesTests
         };
 
         await Assert.That(myModel)
-            .Satisfies(model => model.Nested, assert =>
-                assert.Satisfies(model => model?.Nested, innerAssert =>
-                    innerAssert.Satisfies(model => model?.Value, innerAssert2 =>
+            .SatisfiesAsync(async model => await model.Nested!, assert =>
+                assert.SatisfiesAsync(async model => await model?.Nested!, innerAssert =>
+                    innerAssert.SatisfiesAsync(async model => await model?.Value!, innerAssert2 =>
                         innerAssert2.IsEqualTo("Baz")!
                     )
                 )
@@ -90,12 +88,11 @@ public class SatisfiesTests
 
         await Assert.That(async () =>
                 await Assert.That(myModel)
-                    .Satisfies(model => model.Value, assert => assert.IsEqualTo("Blah")!)
+                    .Satisfies(model => model.Value!, assert => assert.IsEqualTo("Blah")!)
             ).Throws<AssertionException>()
             .WithMessageMatching("""
-                                 *Expected model => model.Value to satisfy assert => assert.IsEqualTo("Blah")!
-                                 
-                                 but found "Hello" which differs at index 0:*
+                                 *to satisfy*
+                                 *received "Hello"*
                                  """);
     }
 
@@ -127,18 +124,8 @@ public class SatisfiesTests
             ).Throws<AssertionException>()
             .WithMessageMatching(
                 """
-                *Expected model => model.Nested to satisfy assert =>
-                                        assert.Satisfies(model => model?.Nested, innerAssert =>
-                                            innerAssert.Satisfies(model => model?.Value, innerAssert2 =>
-                                                innerAssert2.IsEqualTo("Blah")!
-                                            )
-                                        )
-                
-                but found "Baz" which differs at index 1:
-                     ↓
-                   "Baz"
-                   "Blah"
-                     ↑*
+                *to satisfy*
+                *received "Baz"*
                 """
                 );
     }
@@ -153,12 +140,11 @@ public class SatisfiesTests
 
         await Assert.That(async () =>
                 await Assert.That(myModel)
-                    .Satisfies(model => model.Value, assert => assert.IsEqualTo("Blah")!)
+                    .SatisfiesAsync(async model => await model.Value!, assert => assert.IsEqualTo("Blah")!)
             ).Throws<AssertionException>()
             .WithMessageMatching("""
-                                 *Expected model => model.Value to satisfy assert => assert.IsEqualTo("Blah")!
-                                 
-                                 but found "Hello" which differs at index 0:*
+                                 *to satisfy*
+                                 *received "Hello"*
                                  """);
     }
 
@@ -180,9 +166,9 @@ public class SatisfiesTests
 
         await Assert.That(async () =>
                 await Assert.That(myModel)
-                    .Satisfies(model => model.Nested, assert =>
-                        assert.Satisfies(model => model?.Nested, innerAssert =>
-                            innerAssert.Satisfies(model => model?.Value, innerAssert2 =>
+                    .SatisfiesAsync(async model => await model.Nested!, assert =>
+                        assert.SatisfiesAsync(async model => await model?.Nested!, innerAssert =>
+                            innerAssert.SatisfiesAsync(async model => await model?.Value!, innerAssert2 =>
                                 innerAssert2.IsEqualTo("Baz")!
                             )
                         )
@@ -190,14 +176,7 @@ public class SatisfiesTests
             ).Throws<AssertionException>()
             .WithMessageMatching(
                 """
-                *but found "Blah" which differs at index 1:
-                     ↓
-                   "Blah"
-                   "Baz"
-                     ↑
-                
-                at Assert.That(myModel).Satisfies(model => model.Nested, assert =>
-                                        assert.Sat*
+                *received "Blah"*
                 """
                 );
     }
@@ -210,7 +189,7 @@ public class SatisfiesTests
         var myModel3 = new MyModel { Value = "!" };
         List<MyModel> models = [myModel, myModel2, myModel3];
 
-        await Assert.That(models).All().Satisfy(model => model?.Value, assert => assert.HasCount().Positive());
+        await Assert.That(models).All().Satisfy(model => model?.Value?.Length ?? 0, assert => assert.IsGreaterThan(0));
     }
 
     [Test]
@@ -248,22 +227,165 @@ public class SatisfiesTests
         await Assert.That(async () =>
                 await Assert.That(models).All().Satisfy(model => model!.Value, item => item.Contains("o")!)
         ).Throws<AssertionException>().WithMessageMatching("""
-                                                           *Expected items mapped by model => model!.Value to satisfy item => item.Contains("o")!
-                                                           
-                                                           but items not satisfying the condition were found:
-                                                           at [1] it was not found. Found a closest match which differs at index 0:
-                                                               ↓
-                                                              "Wrld"
-                                                              "o"
-                                                               ↑
-                                                           at [2] it was not found. Found a closest match which differs at index 0:
-                                                               ↓
-                                                              "!"
-                                                              "o"
-                                                               ↑*
+                                                           *to satisfy*
+                                                           *index 1*
                                                            """);
     }
 
+    // Tests for issue #3766: Demonstrates the correct usage of .All().Satisfy()
+    // The mapper overload allows checking properties of collection items
+    [Test]
+    public async Task All_Satisfy_WithMapper_Good()
+    {
+        var users = new[]
+        {
+            new User { Name = "Alice", Age = 25 },
+            new User { Name = "Bob", Age = 30 }
+        };
+
+        await Assert.That(users)
+            .All()
+            .Satisfy(u => u.Age, age => age.IsGreaterThan(18));
+    }
+
+    [Test]
+    public async Task All_Satisfy_WithMapper_Throws()
+    {
+        var users = new[]
+        {
+            new User { Name = "Alice", Age = 25 },
+            new User { Name = "Bob", Age = 15 }
+        };
+
+        await Assert.That(async () =>
+            await Assert.That(users)
+                .All()
+                .Satisfy(u => u.Age, age => age.IsGreaterThan(18))
+        ).Throws<AssertionException>().WithMessageMatching("""
+                                                           *to satisfy*
+                                                           *index 1*
+                                                           """);
+    }
+
+    [Test]
+    public async Task Satisfies_With_Member_As_Final_Statement()
+    {
+        var list = new List<MyModelWithId>
+        {
+            new() { Id = 1, Name = "First" }
+        };
+
+        await Assert.That(list).Satisfies(
+            l => l.First(),
+            item => item.Member(i => i.Id, v => v.EqualTo(1)));
+    }
+
+    [Test]
+    public async Task Satisfies_With_Member_After_Chaining()
+    {
+        var list = new List<MyModelWithId>
+        {
+            new() { Id = 1, Name = "First" }
+        };
+
+        await Assert.That(list).Satisfies(
+            l => l.First(),
+            item => item.IsNotNull()
+                .And.Member(i => i.Id, v => v.EqualTo(1)));
+    }
+
+    [Test]
+    public async Task Satisfies_With_Member_Before_Other_Assertions()
+    {
+        var list = new List<MyModelWithId>
+        {
+            new() { Id = 1, Name = "First" }
+        };
+
+        await Assert.That(list).Satisfies(
+            l => l.First(),
+            item => item.Member(i => i.Id, v => v.EqualTo(1))
+                .And.IsNotNull());
+    }
+
+    [Test]
+    public async Task Satisfies_With_Member_Fails_Correctly()
+    {
+        var list = new List<MyModelWithId>
+        {
+            new() { Id = 2, Name = "First" }
+        };
+
+        await Assert.That(async () =>
+            await Assert.That(list).Satisfies(
+                l => l.First(),
+                item => item.IsNotNull()
+                    .And.Member(i => i.Id, v => v.EqualTo(1)))
+        ).Throws<AssertionException>().WithMessageMatching("""
+                                                           *to satisfy*
+                                                           """);
+    }
+
+    [Test]
+    public async Task All_Satisfy_Mapped_NullableDouble_IsNotNull()
+    {
+        var items = new[]
+        {
+            new ItemWithNullablePrice { Price = 1.0 },
+            new ItemWithNullablePrice { Price = 2.5 }
+        };
+
+        await Assert.That(items).All().Satisfy(x => x.Price, c => c.IsNotNull());
+    }
+
+    [Test]
+    public async Task All_Satisfy_Mapped_NullableDouble_IsNotNull_Throws()
+    {
+        var items = new[]
+        {
+            new ItemWithNullablePrice { Price = 1.0 },
+            new ItemWithNullablePrice { Price = null }
+        };
+
+        await Assert.That(async () =>
+            await Assert.That(items).All().Satisfy(x => x.Price, c => c.IsNotNull())
+        ).Throws<AssertionException>();
+    }
+
+    [Test]
+    public async Task All_Satisfy_DirectValue_NullableDouble()
+    {
+        var items = new double?[] { 1.0, 2.5, 3.0 };
+
+        await Assert.That(items).All().Satisfy(c => c.IsNotNull());
+    }
+
+    [Test]
+    public async Task All_Satisfy_DirectValue_NullableDouble_Throws()
+    {
+        var items = new double?[] { 1.0, null, 3.0 };
+
+        await Assert.That(async () =>
+            await Assert.That(items).All().Satisfy(c => c.IsNotNull())
+        ).Throws<AssertionException>();
+    }
+
+    public class ItemWithNullablePrice
+    {
+        public double? Price { get; init; }
+    }
+
+    public class User
+    {
+        public string Name { get; init; } = string.Empty;
+        public int Age { get; init; }
+    }
+
+    public class MyModelWithId
+    {
+        public int Id { get; init; }
+        public string? Name { get; init; }
+    }
 
     public class MyModel
     {

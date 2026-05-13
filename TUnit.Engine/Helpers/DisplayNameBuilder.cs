@@ -1,4 +1,5 @@
 using System.Diagnostics.CodeAnalysis;
+using System.Text;
 using TUnit.Core;
 using TUnit.Core.Helpers;
 
@@ -50,9 +51,16 @@ internal static class DisplayNameBuilder
             return string.Empty;
         }
 
-        var formattedArgs = arguments.Select(arg => ArgumentFormatter.Format(arg, [
-        ])).ToArray();
-        return string.Join(", ", formattedArgs);
+        var sb = new StringBuilder();
+        for (var i = 0; i < arguments.Length; i++)
+        {
+            if (i > 0)
+            {
+                sb.Append(", ");
+            }
+            sb.Append(ArgumentFormatter.Format(arguments[i], []));
+        }
+        return sb.ToString();
     }
 
     /// <summary>
@@ -65,8 +73,16 @@ internal static class DisplayNameBuilder
             return string.Empty;
         }
 
-        var formattedArgs = arguments.Select(arg => ArgumentFormatter.Format(arg, formatters)).ToArray();
-        return string.Join(", ", formattedArgs);
+        var sb = new StringBuilder();
+        for (var i = 0; i < arguments.Length; i++)
+        {
+            if (i > 0)
+            {
+                sb.Append(", ");
+            }
+            sb.Append(ArgumentFormatter.Format(arguments[i], formatters));
+        }
+        return sb.ToString();
     }
 
     /// <summary>
@@ -75,10 +91,15 @@ internal static class DisplayNameBuilder
     public static string BuildGenericDisplayName(TestMetadata metadata, Type[] genericTypes, object?[] arguments)
     {
         var testName = metadata.TestName;
-        
+
         if (genericTypes.Length > 0)
         {
-            var genericPart = string.Join(", ", genericTypes.Select(t => GetSimpleTypeName(t)));
+            var genericTypeNames = new string[genericTypes.Length];
+            for (var i = 0; i < genericTypes.Length; i++)
+            {
+                genericTypeNames[i] = GetSimpleTypeName(genericTypes[i]);
+            }
+            var genericPart = string.Join(", ", genericTypeNames);
             testName = $"{testName}<{genericPart}>";
         }
 
@@ -106,16 +127,22 @@ internal static class DisplayNameBuilder
         }
 
         var genericArgs = type.GetGenericArguments();
-        var genericArgsText = string.Join(", ", genericArgs.Select(GetSimpleTypeName));
-        
+        var genericArgNames = new string[genericArgs.Length];
+        for (var i = 0; i < genericArgs.Length; i++)
+        {
+            genericArgNames[i] = GetSimpleTypeName(genericArgs[i]);
+        }
+        var genericArgsText = string.Join(", ", genericArgNames);
+
         return $"{genericTypeName}<{genericArgsText}>";
     }
 
     /// <summary>
     /// Resolves the actual value from a data source factory result
     /// </summary>
-    [UnconditionalSuppressMessage("AOT", "IL2075:Target method return value does not satisfy annotation requirements.",
-        Justification = "This is for reflection mode which doesn't support AOT")]
+#if NET8_0_OR_GREATER
+    [RequiresUnreferencedCode("Data source value resolution may use reflection")]
+#endif
     public static async Task<object?> ResolveDataSourceValue(object? value)
     {
         if (value == null)

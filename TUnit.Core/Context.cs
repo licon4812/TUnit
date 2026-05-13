@@ -14,23 +14,63 @@ public abstract class Context : IContext, IDisposable
 
     public static Context Current =>
         TestContext.Current as Context
+        ?? TestBuildContext.Current as Context
         ?? ClassHookContext.Current as Context
         ?? AssemblyHookContext.Current as Context
         ?? TestSessionContext.Current as Context
         ?? BeforeTestDiscoveryContext.Current as Context
         ?? GlobalContext.Current;
 
-    private StringBuilder? _outputStringBuilder;
-    private StringBuilder? _errorOutputStringBuilder;
+    // Lazy output state: avoid allocating StringBuilder + RWLS + ConsoleLineBuffer
+    // for contexts that never receive output (the common case for most tests)
+    private StringBuilder? _outputBuilder;
+    private StringBuilder? _errorOutputBuilder;
+    private ReaderWriterLockSlim? _outputLock;
+    private ReaderWriterLockSlim? _errorOutputLock;
     private DefaultLogger? _defaultLogger;
-    private readonly Lock _outputLock = new();
-    private readonly Lock _errorLock = new();
 
-    [field: AllowNull, MaybeNull]
-    public TextWriter OutputWriter => field ??= new SynchronizedStringWriter(_outputStringBuilder ??= new StringBuilder(), _outputLock);
+    // Console interceptor line buffers for partial writes (Console.Write without newline)
+    // These are stored per-context to prevent output mixing between parallel tests
+    // ConsoleLineBuffer uses Lock internally for efficient synchronization
+    private ConsoleLineBuffer? _consoleStdOutLineBuffer;
+    private ConsoleLineBuffer? _consoleStdErrLineBuffer;
 
-    [field: AllowNull, MaybeNull]
-    public TextWriter ErrorOutputWriter => field ??= new SynchronizedStringWriter(_errorOutputStringBuilder ??= new StringBuilder(), _errorLock);
+    // Set by the console interceptor on first write so TestCoordinator can skip the
+    // two Console.Out/Err FlushAsync state machines per test when nothing was written.
+    // Volatile read/write is cheap and sufficient — the flag only ever transitions false -> true.
+    private int _consoleOutputCaptured;
+
+    // Thread-safe: console interceptors may access from multiple threads.
+    private StringBuilder GetOutputBuilder() =>
+        LazyInitializer.EnsureInitialized(ref _outputBuilder)!;
+    private StringBuilder GetErrorOutputBuilder() =>
+        LazyInitializer.EnsureInitialized(ref _errorOutputBuilder)!;
+    private ReaderWriterLockSlim GetOutputLock() =>
+        LazyInitializer.EnsureInitialized(ref _outputLock, static () => new ReaderWriterLockSlim(LockRecursionPolicy.NoRecursion))!;
+    private ReaderWriterLockSlim GetErrorOutputLock() =>
+        LazyInitializer.EnsureInitialized(ref _errorOutputLock, static () => new ReaderWriterLockSlim(LockRecursionPolicy.NoRecursion))!;
+
+    private ConcurrentStringWriter? _outputWriter;
+    private ConcurrentStringWriter? _errorOutputWriter;
+    private ConcurrentStringWriter GetOutputWriter() =>
+        LazyInitializer.EnsureInitialized(ref _outputWriter, () => new ConcurrentStringWriter(GetOutputBuilder(), GetOutputLock()))!;
+    private ConcurrentStringWriter GetErrorOutputWriter() =>
+        LazyInitializer.EnsureInitialized(ref _errorOutputWriter, () => new ConcurrentStringWriter(GetErrorOutputBuilder(), GetErrorOutputLock()))!;
+
+    public TextWriter OutputWriter => GetOutputWriter();
+
+    public TextWriter ErrorOutputWriter => GetErrorOutputWriter();
+
+    // Internal accessors for console interceptor line buffers
+    internal ConsoleLineBuffer ConsoleStdOutLineBuffer =>
+        LazyInitializer.EnsureInitialized(ref _consoleStdOutLineBuffer)!;
+
+    internal ConsoleLineBuffer ConsoleStdErrLineBuffer =>
+        LazyInitializer.EnsureInitialized(ref _consoleStdErrLineBuffer)!;
+
+    internal bool HasCapturedConsoleOutput => Volatile.Read(ref _consoleOutputCaptured) != 0;
+
+    internal void MarkConsoleOutputCaptured() => Volatile.Write(ref _consoleOutputCaptured, 1);
 
     internal Context(Context? parent)
     {
@@ -38,26 +78,30 @@ public abstract class Context : IContext, IDisposable
     }
 
 #if NET
+    internal System.Diagnostics.Activity? Activity { get; set; }
     internal ExecutionContext? ExecutionContext { get; private set; }
 #endif
 
     public void RestoreExecutionContext()
     {
 #if NET
-        RestoreContextAsyncLocal();
-        
-        Parent?.RestoreExecutionContext();
-
         if (ExecutionContext is not null)
         {
+            // ExecutionContext.Restore() restores ALL AsyncLocal values — including
+            // Activity.Current. The captured ExecutionContext may contain a stale
+            // (already-stopped) Activity from a previous hook/event receiver.
+            // Save the current Activity and restore it after the EC restore to
+            // prevent Activity chain corruption across parallel tests.
+            var currentActivity = System.Diagnostics.Activity.Current;
             ExecutionContext.Restore(ExecutionContext);
+            System.Diagnostics.Activity.Current = currentActivity;
         }
-        
-        RestoreContextAsyncLocal();
+
+        SetAsyncLocalContext();
 #endif
     }
 
-    internal abstract void RestoreContextAsyncLocal();
+    internal abstract void SetAsyncLocalContext();
 
     public void AddAsyncLocalValues()
     {
@@ -71,21 +115,14 @@ public abstract class Context : IContext, IDisposable
 #endif
     }
 
-    public string GetStandardOutput()
-    {
-        lock (_outputLock)
-        {
-            return _outputStringBuilder?.ToString().Trim() ?? string.Empty;
-        }
-    }
+    public virtual string GetStandardOutput() => _outputWriter?.GetContent() ?? string.Empty;
 
-    public string GetErrorOutput()
-    {
-        lock (_errorLock)
-        {
-            return _errorOutputStringBuilder?.ToString().Trim() ?? string.Empty;
-        }
-    }
+    public virtual string GetErrorOutput() => _errorOutputWriter?.GetContent() ?? string.Empty;
+
+    // Fast path for callers that need to know whether anything was ever captured —
+    // lets the result-building code skip the reader/writer lock acquisition entirely
+    // for the (very common) case of a passing test with no output.
+    internal virtual bool HasCapturedOutput => _outputWriter != null || _errorOutputWriter != null;
 
     public DefaultLogger GetDefaultLogger()
     {
@@ -95,32 +132,51 @@ public abstract class Context : IContext, IDisposable
     public void Dispose()
     {
 #if NET
+        TUnitActivitySource.StopActivity(Activity);
+        Activity = null;
         ExecutionContext?.Dispose();
 #endif
+        _outputLock?.Dispose();
+        _errorOutputLock?.Dispose();
     }
 }
 
 /// <summary>
-/// A TextWriter wrapper that provides thread-safe access to a StringBuilder
+/// A concurrent TextWriter implementation that provides thread-safe access to a StringBuilder
 /// </summary>
-internal sealed class SynchronizedStringWriter : TextWriter
+internal sealed class ConcurrentStringWriter : TextWriter
 {
-    private readonly StringBuilder _stringBuilder;
-    private readonly Lock _lock;
+    private const int MaxOutputLength = 1_048_576; // 1M chars (~2MB)
 
-    public SynchronizedStringWriter(StringBuilder stringBuilder, Lock lockObject)
+    // Trim to 75% of max to avoid re-trimming on every subsequent write
+    private const int TrimTarget = MaxOutputLength * 3 / 4;
+
+    private static readonly string TruncationNotice =
+        $"[... output truncated — exceeded {MaxOutputLength:N0} character limit, showing most recent output ...]{Environment.NewLine}";
+
+    private readonly StringBuilder _builder;
+    private readonly ReaderWriterLockSlim _lock;
+    private bool _truncated;
+
+    public ConcurrentStringWriter(StringBuilder builder, ReaderWriterLockSlim lockSlim)
     {
-        _stringBuilder = stringBuilder;
-        _lock = lockObject;
+        _builder = builder;
+        _lock = lockSlim;
     }
 
     public override Encoding Encoding => Encoding.UTF8;
 
     public override void Write(char value)
     {
-        lock (_lock)
+        _lock.EnterWriteLock();
+        try
         {
-            _stringBuilder.Append(value);
+            _builder.Append(value);
+            TrimIfNeeded();
+        }
+        finally
+        {
+            _lock.ExitWriteLock();
         }
     }
 
@@ -128,48 +184,254 @@ internal sealed class SynchronizedStringWriter : TextWriter
     {
         if (value != null)
         {
-            lock (_lock)
+            _lock.EnterWriteLock();
+            try
             {
-                _stringBuilder.Append(value);
+                _builder.Append(value);
+                TrimIfNeeded();
+            }
+            finally
+            {
+                _lock.ExitWriteLock();
             }
         }
     }
 
     public override void Write(char[] buffer, int index, int count)
     {
-        lock (_lock)
+        if (buffer != null && count > 0)
         {
-            _stringBuilder.Append(buffer, index, count);
+            _lock.EnterWriteLock();
+            try
+            {
+                _builder.Append(buffer, index, count);
+                TrimIfNeeded();
+            }
+            finally
+            {
+                _lock.ExitWriteLock();
+            }
         }
     }
 
     public override void WriteLine()
     {
-        lock (_lock)
+        _lock.EnterWriteLock();
+        try
         {
-            _stringBuilder.AppendLine();
+            _builder.AppendLine();
+            TrimIfNeeded();
+        }
+        finally
+        {
+            _lock.ExitWriteLock();
         }
     }
 
     public override void WriteLine(string? value)
     {
-        lock (_lock)
+        _lock.EnterWriteLock();
+        try
         {
-            _stringBuilder.AppendLine(value);
+            _builder.AppendLine(value);
+            TrimIfNeeded();
+        }
+        finally
+        {
+            _lock.ExitWriteLock();
         }
     }
 
-    public override string ToString()
+    public override void Write(char[]? buffer)
     {
-        lock (_lock)
+        if (buffer != null)
         {
-            return _stringBuilder.ToString();
+            _lock.EnterWriteLock();
+            try
+            {
+                _builder.Append(buffer);
+                TrimIfNeeded();
+            }
+            finally
+            {
+                _lock.ExitWriteLock();
+            }
         }
+    }
+
+    public override void Write(bool value)
+    {
+        _lock.EnterWriteLock();
+        try
+        {
+            _builder.Append(value);
+            TrimIfNeeded();
+        }
+        finally
+        {
+            _lock.ExitWriteLock();
+        }
+    }
+
+    public override void Write(int value)
+    {
+        _lock.EnterWriteLock();
+        try
+        {
+            _builder.Append(value);
+            TrimIfNeeded();
+        }
+        finally
+        {
+            _lock.ExitWriteLock();
+        }
+    }
+
+    public override void Write(uint value)
+    {
+        _lock.EnterWriteLock();
+        try
+        {
+            _builder.Append(value);
+            TrimIfNeeded();
+        }
+        finally
+        {
+            _lock.ExitWriteLock();
+        }
+    }
+
+    public override void Write(long value)
+    {
+        _lock.EnterWriteLock();
+        try
+        {
+            _builder.Append(value);
+            TrimIfNeeded();
+        }
+        finally
+        {
+            _lock.ExitWriteLock();
+        }
+    }
+
+    public override void Write(ulong value)
+    {
+        _lock.EnterWriteLock();
+        try
+        {
+            _builder.Append(value);
+            TrimIfNeeded();
+        }
+        finally
+        {
+            _lock.ExitWriteLock();
+        }
+    }
+
+    public override void Write(float value)
+    {
+        _lock.EnterWriteLock();
+        try
+        {
+            _builder.Append(value);
+            TrimIfNeeded();
+        }
+        finally
+        {
+            _lock.ExitWriteLock();
+        }
+    }
+
+    public override void Write(double value)
+    {
+        _lock.EnterWriteLock();
+        try
+        {
+            _builder.Append(value);
+            TrimIfNeeded();
+        }
+        finally
+        {
+            _lock.ExitWriteLock();
+        }
+    }
+
+    public override void Write(decimal value)
+    {
+        _lock.EnterWriteLock();
+        try
+        {
+            _builder.Append(value);
+            TrimIfNeeded();
+        }
+        finally
+        {
+            _lock.ExitWriteLock();
+        }
+    }
+
+    public override void Write(object? value)
+    {
+        if (value != null)
+        {
+            _lock.EnterWriteLock();
+            try
+            {
+                _builder.Append(value);
+                TrimIfNeeded();
+            }
+            finally
+            {
+                _lock.ExitWriteLock();
+            }
+        }
+    }
+
+    private void TrimIfNeeded()
+    {
+        if (_builder.Length > MaxOutputLength)
+        {
+            var removeCount = _builder.Length - TrimTarget;
+
+            // Avoid splitting a surrogate pair at the trim boundary
+            if (removeCount > 0 && char.IsHighSurrogate(_builder[removeCount - 1]))
+            {
+                removeCount--;
+            }
+
+            _builder.Remove(0, removeCount);
+            _truncated = true;
+        }
+    }
+
+    internal string GetContent()
+    {
+        _lock.EnterReadLock();
+        try
+        {
+            if (_builder.Length == 0)
+            {
+                return string.Empty;
+            }
+
+            var content = _builder.ToString();
+            return _truncated ? string.Concat(TruncationNotice, content) : content;
+        }
+        finally
+        {
+            _lock.ExitReadLock();
+        }
+    }
+
+    public override void Flush()
+    {
+        // StringBuilder doesn't need flushing
     }
 
     protected override void Dispose(bool disposing)
     {
-        // Nothing to dispose, StringBuilder doesn't implement IDisposable
+        // Don't dispose the lock or builder - they're owned by Context
         base.Dispose(disposing);
     }
 }

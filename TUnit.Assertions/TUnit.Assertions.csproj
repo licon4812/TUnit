@@ -1,6 +1,7 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
 
     <Import Project="..\Library.props" />
+    <Import Project="..\SourceGenerationDebug.props" />
 
     <ItemGroup>
         <ProjectReference Include="..\TUnit.Assertions.Analyzers\TUnit.Assertions.Analyzers.csproj" OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
@@ -10,6 +11,10 @@
         <ProjectReference Include="..\TUnit.Assertions.Analyzers.CodeFixers\TUnit.Assertions.Analyzers.CodeFixers.csproj" OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
 
         <None Include="$(MSBuildProjectDirectory)\..\TUnit.Assertions.Analyzers.CodeFixers\bin\$(Configuration)\netstandard2.0\TUnit.Assertions.Analyzers.CodeFixers.dll" Pack="true" PackagePath="analyzers/dotnet/cs" Visible="false" />
+
+        <ProjectReference Include="..\TUnit.Assertions.SourceGenerator\TUnit.Assertions.SourceGenerator.csproj" OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
+
+        <None Include="$(MSBuildProjectDirectory)\..\TUnit.Assertions.SourceGenerator\bin\$(Configuration)\netstandard2.0\TUnit.Assertions.SourceGenerator.dll" Pack="true" PackagePath="analyzers/dotnet/cs" Visible="false" />
     </ItemGroup>
 
     <ItemGroup>
@@ -43,12 +48,15 @@
         </None>
     </ItemGroup>
 
-    <ItemGroup>
-        <PackageReference Remove="Backport.System.Threading.Lock" />
-    </ItemGroup>
-
     <ItemGroup Condition="'$(TargetFramework)' == 'netstandard2.0'">
         <PackageReference Include="System.Collections.Immutable" />
+        <PackageReference Include="System.Text.Json" />
     </ItemGroup>
+
+    <ItemGroup>
+      <Folder Include="Assertions\Extensions\" />
+    </ItemGroup>
+
+  <Import Project="..\Library.targets" />
 
 </Project>

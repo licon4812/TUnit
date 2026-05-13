@@ -1,4 +1,5 @@
 using System.Diagnostics.CodeAnalysis;
+using System.Runtime.CompilerServices;
 using TUnit.Core;
 
 namespace TUnit.Engine.Building;
@@ -8,10 +9,9 @@ internal static class ReflectionMetadataBuilder
     /// <summary>
     /// Creates method metadata from reflection info with proper ReflectionInfo populated
     /// </summary>
-    [UnconditionalSuppressMessage("Trimming", "IL2067:Target parameter argument does not satisfy 'DynamicallyAccessedMembersAttribute' in call to target method",
-        Justification = "Parameter types discovered from MethodInfo.GetParameters() cannot be statically analyzed. Used for reflection-based and dynamic test discovery.")]
-    [UnconditionalSuppressMessage("Trimming", "IL2072:Target parameter argument does not satisfy 'DynamicallyAccessedMembersAttribute' in call to target method. The return value of the source method does not have matching annotations.",
-        Justification = "ParameterInfo.ParameterType cannot be annotated. For AOT scenarios, source-generated metadata is preferred.")]
+#if NET8_0_OR_GREATER
+    [RequiresUnreferencedCode("Method metadata creation uses reflection on parameters and types")]
+#endif
     public static MethodMetadata CreateMethodMetadata(
         [DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicConstructors
             | DynamicallyAccessedMemberTypes.NonPublicConstructors
@@ -24,24 +24,25 @@ internal static class ReflectionMetadataBuilder
         {
             Name = method.Name,
             Type = type,
-            TypeReference = CreateTypeReference(type),
+            TypeInfo = CreateTypeInfo(type),
             Class = CreateClassMetadata(type),
             Parameters = method.GetParameters()
                 .Select((p, i) => CreateParameterMetadata(p.ParameterType, p.Name ?? "unnamed", i, p))
                 .ToArray(),
             GenericTypeCount = method.IsGenericMethodDefinition ? method.GetGenericArguments().Length : 0,
-            ReturnTypeReference = CreateTypeReference(method.ReturnType),
+            ReturnTypeInfo = CreateTypeInfo(method.ReturnType),
             ReturnType = method.ReturnType
         };
     }
 
-    private static TypeReference CreateTypeReference(Type type)
+    private static TypeInfo CreateTypeInfo(Type type)
     {
-        return TypeReference.CreateConcrete(type.AssemblyQualifiedName ?? type.FullName ?? type.Name);
+        return new ConcreteType(type);
     }
 
-    [UnconditionalSuppressMessage("Trimming", "IL2067:Target parameter argument does not satisfy 'DynamicallyAccessedMembersAttribute' in call to target method",
-        Justification = "ParameterMetadata constructor requires annotated types. Callers ensure types have required members preserved.")]
+#if NET8_0_OR_GREATER
+    [RequiresUnreferencedCode("Parameter metadata creation uses reflection")]
+#endif
     private static ParameterMetadata CreateParameterMetadata(
         [DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicConstructors
             | DynamicallyAccessedMemberTypes.PublicMethods
@@ -50,7 +51,7 @@ internal static class ReflectionMetadataBuilder
         return new ParameterMetadata(parameterType)
         {
             Name = name ?? $"param{index}",
-            TypeReference = CreateTypeReference(parameterType),
+            TypeInfo = CreateTypeInfo(parameterType),
             ReflectionInfo = reflectionInfo,
             Type = parameterType,
             IsNullable = parameterType.IsGenericType && parameterType.GetGenericTypeDefinition() == typeof(Nullable<>)
@@ -58,8 +59,9 @@ internal static class ReflectionMetadataBuilder
         };
     }
 
-    [UnconditionalSuppressMessage("Trimming", "IL2072:Target parameter argument does not satisfy 'DynamicallyAccessedMembersAttribute' in call to target method. The return value of the source method does not have matching annotations.",
-        Justification = "Constructor parameter types from ParameterInfo cannot be annotated. Used for test class metadata creation.")]
+#if NET8_0_OR_GREATER
+    [RequiresUnreferencedCode("Class metadata creation uses reflection on constructors")]
+#endif
     private static ClassMetadata CreateClassMetadata([DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicConstructors
         | DynamicallyAccessedMemberTypes.NonPublicConstructors
         | DynamicallyAccessedMemberTypes.PublicMethods
@@ -80,7 +82,7 @@ internal static class ReflectionMetadataBuilder
             {
                 Name = type.Name,
                 Type = type,
-                TypeReference = CreateTypeReference(type),
+                TypeInfo = CreateTypeInfo(type),
                 Namespace = type.Namespace ?? string.Empty,
                 Assembly = AssemblyMetadata.GetOrAdd(type.Assembly.GetName().FullName, () => new AssemblyMetadata
                 {
@@ -88,7 +90,7 @@ internal static class ReflectionMetadataBuilder
                 }),
                 Parameters = constructorParameters,
                 Properties = [],
-                Parent = null
+                Parent = type.DeclaringType != null ? CreateClassMetadata(type.DeclaringType) : null
             };
         });
     }

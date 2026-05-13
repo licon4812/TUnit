@@ -1,0 +1,710 @@
+using System.Collections.Concurrent;
+using System.Diagnostics;
+using System.Diagnostics.CodeAnalysis;
+using System.Reflection;
+using TUnit.Core.Extensions;
+using TUnit.Core.Interfaces;
+using TUnit.Core.Interfaces.SourceGenerator;
+using TUnit.Core.PropertyInjection;
+
+namespace TUnit.Core.Discovery;
+
+/// <summary>
+/// Represents an error that occurred during object graph discovery.
+/// </summary>
+/// <param name="TypeName">The name of the type being inspected.</param>
+/// <param name="PropertyName">The name of the property that failed to access.</param>
+/// <param name="ErrorMessage">The error message.</param>
+/// <param name="Exception">The exception that occurred.</param>
+internal readonly record struct DiscoveryError(string TypeName, string PropertyName, string ErrorMessage, Exception Exception);
+
+/// <summary>
+/// Centralized service for discovering and organizing object graphs.
+/// Consolidates duplicate graph traversal logic from ObjectGraphDiscoveryService and TrackableObjectGraphProvider.
+/// Follows Single Responsibility Principle - only discovers objects, doesn't modify them.
+/// </summary>
+/// <remarks>
+/// <para>
+/// This class is thread-safe and uses cached reflection for performance.
+/// Objects are organized by their nesting depth in the hierarchy:
+/// </para>
+/// <list type="bullet">
+/// <item><description>Depth 0: Root objects (class args, method args, property values)</description></item>
+/// <item><description>Depth 1+: Nested objects found in properties of objects at previous depth</description></item>
+/// </list>
+/// <para>
+/// Discovery errors (e.g., property access failures) are collected in <see cref="GetDiscoveryErrors"/>
+/// rather than thrown, allowing discovery to continue despite individual property failures.
+/// </para>
+/// </remarks>
+internal sealed class ObjectGraphDiscoverer : IObjectGraphTracker
+{
+    /// <summary>
+    /// Maximum recursion depth for object graph discovery.
+    /// Prevents stack overflow on deep or circular object graphs.
+    /// </summary>
+    private const int MaxRecursionDepth = 50;
+
+    // Reference equality comparer for object tracking (ignores Equals overrides)
+    private static readonly Helpers.ReferenceEqualityComparer ReferenceComparer = Helpers.ReferenceEqualityComparer.Instance;
+
+    // Types to skip during discovery (primitives, strings, system types)
+    private static readonly HashSet<Type> SkipTypes =
+    [
+        typeof(string),
+        typeof(decimal),
+        typeof(DateTime),
+        typeof(DateTimeOffset),
+        typeof(TimeSpan),
+        typeof(Guid)
+    ];
+
+    // Thread-safe collection of discovery errors for diagnostics
+    private static readonly ConcurrentBag<DiscoveryError> DiscoveryErrors = [];
+
+    // Memoize ShouldSkipType — Namespace.StartsWith("System") is expensive when repeated
+    // across every per-test initializer traversal.
+    private static readonly ConcurrentDictionary<Type, bool> ShouldSkipTypeCache = new();
+
+    // Cached flattened InitializerPropertyInfo[] for each type, including base-class
+    // properties with derived-first precedence. Traversal would otherwise walk the
+    // inheritance chain and allocate a HashSet<string> on every call.
+    // - non-null array: type has registered source-gen metadata (at this or an ancestor level).
+    // - null           : no source-gen registration anywhere in hierarchy — use reflection fallback.
+    private static readonly ConcurrentDictionary<Type, InitializerPropertyInfo[]?> FlattenedInitializerPropertiesCache = new();
+
+    /// <summary>
+    /// Gets all discovery errors that occurred during object graph traversal.
+    /// Useful for debugging and diagnostics when property access fails.
+    /// </summary>
+    /// <returns>A read-only list of discovery errors.</returns>
+    public static IReadOnlyList<DiscoveryError> GetDiscoveryErrors()
+    {
+        return DiscoveryErrors.ToArray();
+    }
+
+    /// <summary>
+    /// Clears all recorded discovery errors. Call at end of test session.
+    /// </summary>
+    public static void ClearDiscoveryErrors()
+    {
+        DiscoveryErrors.Clear();
+    }
+
+    /// <summary>
+    /// Delegate for adding discovered objects to collections.
+    /// Returns true if the object was newly added (not a duplicate).
+    /// </summary>
+    private delegate bool TryAddObjectFunc(object obj, int depth);
+
+    /// <summary>
+    /// Delegate for recursive discovery after an object is added.
+    /// </summary>
+    private delegate void RecurseFunc(object obj, int depth);
+
+    /// <summary>
+    /// Delegate for processing a root object after it's been added.
+    /// </summary>
+    private delegate void RootObjectCallback(object obj);
+
+    /// <inheritdoc />
+    public ObjectGraph DiscoverObjectGraph(TestContext testContext, CancellationToken cancellationToken = default)
+    {
+        var objectsByDepth = new Dictionary<int, HashSet<object>>();
+        var visitedObjects = new HashSet<object>(ReferenceComparer);
+
+        // Standard mode add callback (thread-safe)
+        bool TryAddStandard(object obj, int depth)
+        {
+            if (!visitedObjects.Add(obj))
+            {
+                return false;
+            }
+
+            TryAddToHashSet(objectsByDepth, depth, obj);
+
+            return true;
+        }
+
+        // Collect root-level objects and discover nested objects
+        CollectRootObjects(
+            testContext.Metadata.TestDetails,
+            TryAddStandard,
+            obj => DiscoverNestedObjects(obj, objectsByDepth, visitedObjects, currentDepth: 1, cancellationToken),
+            cancellationToken);
+
+        return new ObjectGraph(objectsByDepth);
+    }
+
+    /// <inheritdoc />
+    public ObjectGraph DiscoverNestedObjectGraph(object rootObject, CancellationToken cancellationToken = default)
+    {
+        var objectsByDepth = new Dictionary<int, HashSet<object>>();
+        var visitedObjects = new HashSet<object>(ReferenceComparer);
+
+        if (visitedObjects.Add(rootObject))
+        {
+            TryAddToHashSet(objectsByDepth, 0, rootObject);
+
+            DiscoverNestedObjects(rootObject, objectsByDepth, visitedObjects, currentDepth: 1, cancellationToken);
+        }
+
+        return new ObjectGraph(objectsByDepth);
+    }
+
+    /// <summary>
+    /// Discovers objects and adds them to the existing tracked objects dictionary.
+    /// Used by TrackableObjectGraphProvider to populate TestContext.TrackedObjects.
+    /// </summary>
+    /// <param name="testContext">The test context to discover objects from.</param>
+    /// <param name="cancellationToken">Cancellation token for the operation.</param>
+    /// <returns>The tracked objects dictionary (same as testContext.TrackedObjects).</returns>
+    public SortedList<int, HashSet<object>> DiscoverAndTrackObjects(TestContext testContext, CancellationToken cancellationToken = default)
+    {
+        var visitedObjects = testContext.TrackedObjects;
+
+        // Collect root-level objects and discover nested objects for tracking
+        CollectRootObjects(
+            testContext.Metadata.TestDetails,
+            (obj, depth) => TryAddToHashSet(visitedObjects, depth, obj),
+            obj => DiscoverNestedObjectsForTracking(obj, visitedObjects, 1, cancellationToken),
+            cancellationToken);
+
+        return visitedObjects;
+    }
+
+    /// <summary>
+    /// Recursively discovers nested objects that have injectable properties OR implement IAsyncInitializer.
+    /// Uses consolidated TraverseInjectableProperties and TraverseInitializerProperties methods.
+    /// </summary>
+    private void DiscoverNestedObjects(
+        object obj,
+        Dictionary<int, HashSet<object>> objectsByDepth,
+        HashSet<object> visitedObjects,
+        int currentDepth,
+        CancellationToken cancellationToken)
+    {
+        if (!CheckRecursionDepth(obj, currentDepth))
+        {
+            return;
+        }
+
+        cancellationToken.ThrowIfCancellationRequested();
+
+        // Standard mode add callback: visitedObjects + objectsByDepth + allObjects (thread-safe)
+        bool TryAddStandard(object value, int depth)
+        {
+            if (!visitedObjects.Add(value))
+            {
+                return false;
+            }
+
+            TryAddToHashSet(objectsByDepth, depth, value);
+
+            return true;
+        }
+
+        // Recursive callback
+        void Recurse(object value, int depth)
+        {
+            DiscoverNestedObjects(value, objectsByDepth, visitedObjects, depth, cancellationToken);
+        }
+
+        // Traverse injectable properties (useSourceRegistrarCheck = false)
+        TraverseInjectableProperties(obj, TryAddStandard, Recurse, currentDepth, cancellationToken, useSourceRegistrarCheck: false);
+
+        // Also discover nested IAsyncInitializer objects from ALL properties
+        TraverseInitializerProperties(obj, TryAddStandard, Recurse, currentDepth, cancellationToken);
+    }
+
+    /// <summary>
+    /// Discovers nested objects for tracking (uses HashSet pattern for compatibility with TestContext.TrackedObjects).
+    /// Uses consolidated TraverseInjectableProperties and TraverseInitializerProperties methods.
+    /// </summary>
+    private void DiscoverNestedObjectsForTracking(
+        object obj,
+        IDictionary<int, HashSet<object>> visitedObjects,
+        int currentDepth,
+        CancellationToken cancellationToken)
+    {
+        if (!CheckRecursionDepth(obj, currentDepth))
+        {
+            return;
+        }
+
+        cancellationToken.ThrowIfCancellationRequested();
+
+        // Tracking mode add callback: TryAddToHashSet only
+        bool TryAddTracking(object value, int depth)
+        {
+            return TryAddToHashSet(visitedObjects, depth, value);
+        }
+
+        // Recursive callback
+        void Recurse(object value, int depth)
+        {
+            DiscoverNestedObjectsForTracking(value, visitedObjects, depth, cancellationToken);
+        }
+
+        // Traverse injectable properties (useSourceRegistrarCheck = true for tracking mode)
+        TraverseInjectableProperties(obj, TryAddTracking, Recurse, currentDepth, cancellationToken, useSourceRegistrarCheck: true);
+
+        // Also discover nested IAsyncInitializer objects from ALL properties
+        TraverseInitializerProperties(obj, TryAddTracking, Recurse, currentDepth, cancellationToken);
+    }
+
+    /// <summary>
+    /// Clears all caches. Called at end of test session to release memory.
+    /// </summary>
+    public static void ClearCache()
+    {
+        PropertyCacheManager.ClearCache();
+        TypeHierarchyCache.Clear();
+        ShouldSkipTypeCache.Clear();
+        FlattenedInitializerPropertiesCache.Clear();
+        ClearDiscoveryErrors();
+    }
+
+    /// <summary>
+    /// Checks if a type should be skipped during discovery. Result is memoized per type —
+    /// the underlying check (Namespace.StartsWith) is stable for any given type.
+    /// </summary>
+    private static bool ShouldSkipType(Type type)
+        => ShouldSkipTypeCache.GetOrAdd(type, static t =>
+            t.IsPrimitive ||
+            SkipTypes.Contains(t) ||
+            t.Namespace?.StartsWith("System", StringComparison.Ordinal) == true);
+
+    /// <summary>
+    /// Add to HashSet at specified depth. Returns true if added (not duplicate).
+    /// </summary>
+    private static bool TryAddToHashSet(IDictionary<int, HashSet<object>> dict, int depth, object obj)
+    {
+        var hashSet = dict.GetOrAdd(depth, _ => new HashSet<object>(ReferenceComparer));
+        return hashSet.Add(obj);
+    }
+
+    #region Consolidated Traversal Methods (DRY)
+
+    /// <summary>
+    /// Checks recursion depth guard. Returns false if depth exceeded (caller should return early).
+    /// </summary>
+    private static bool CheckRecursionDepth(object obj, int currentDepth)
+    {
+        if (currentDepth > MaxRecursionDepth)
+        {
+#if DEBUG
+            Debug.WriteLine($"[ObjectGraphDiscoverer] Max recursion depth ({MaxRecursionDepth}) reached for type '{obj.GetType().Name}'");
+#endif
+            return false;
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// Unified traversal for injectable properties (from PropertyInjectionCache).
+    /// Eliminates duplicate code between DiscoverNestedObjects and DiscoverNestedObjectsForTracking.
+    /// </summary>
+    [UnconditionalSuppressMessage("Trimming", "IL2026", Justification = "Property discovery handles both AOT and reflection modes")]
+    private static void TraverseInjectableProperties(
+        object obj,
+        TryAddObjectFunc tryAdd,
+        RecurseFunc recurse,
+        int currentDepth,
+        CancellationToken cancellationToken,
+        bool useSourceRegistrarCheck)
+    {
+        var plan = PropertyInjectionCache.GetOrCreatePlan(obj.GetType());
+
+        if (!plan.HasProperties && !useSourceRegistrarCheck)
+        {
+            return;
+        }
+
+        // Both modes should use source-gen ONLY if we actually have source-generated properties.
+        // This ensures fallback to reflection when source-gen is enabled but no metadata was generated
+        // for a specific type (e.g., user's WebApplicationFactory that wasn't processed by the generator).
+        bool useSourceGen = plan.SourceGeneratedProperties.Length > 0;
+
+        if (useSourceGen)
+        {
+            TraverseSourceGeneratedProperties(obj, plan.SourceGeneratedProperties, tryAdd, recurse, currentDepth, cancellationToken);
+        }
+        else if (plan.ReflectionProperties.Length > 0)
+        {
+            TraverseReflectionProperties(obj, plan.ReflectionProperties, tryAdd, recurse, currentDepth, cancellationToken);
+        }
+    }
+
+    /// <summary>
+    /// Traverses source-generated properties and discovers nested objects.
+    /// Extracted for reduced complexity in TraverseInjectableProperties.
+    /// </summary>
+    [UnconditionalSuppressMessage("Trimming", "IL2026", Justification = "Property discovery handles both AOT and reflection modes")]
+    private static void TraverseSourceGeneratedProperties(
+        object obj,
+        PropertyInjectionMetadata[] sourceGeneratedProperties,
+        TryAddObjectFunc tryAdd,
+        RecurseFunc recurse,
+        int currentDepth,
+        CancellationToken cancellationToken)
+    {
+        foreach (var metadata in sourceGeneratedProperties)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            // Use the compile-time-generated getter when the source generator emitted one,
+            // otherwise fall back to a cached reflection-based getter. Eliminates the
+            // per-test Type.GetProperty reflection lookup on the hot path.
+            // null getter => property is not readable; skip.
+            var getter = metadata.GetOrCreateGetter();
+            if (getter is null)
+            {
+                continue;
+            }
+
+            var value = getter(obj);
+            if (value != null && tryAdd(value, currentDepth))
+            {
+                recurse(value, currentDepth + 1);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Traverses reflection-based properties and discovers nested objects.
+    /// Extracted for reduced complexity in TraverseInjectableProperties.
+    /// </summary>
+    private static void TraverseReflectionProperties(
+        object obj,
+        (PropertyInfo Property, IDataSourceAttribute DataSource)[] reflectionProperties,
+        TryAddObjectFunc tryAdd,
+        RecurseFunc recurse,
+        int currentDepth,
+        CancellationToken cancellationToken)
+    {
+        foreach (var prop in reflectionProperties)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var value = prop.Property.GetValue(obj);
+            if (value != null && tryAdd(value, currentDepth))
+            {
+                recurse(value, currentDepth + 1);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Unified traversal for IAsyncInitializer objects (from all properties).
+    /// Eliminates duplicate code between DiscoverNestedInitializerObjects and DiscoverNestedInitializerObjectsForTracking.
+    /// </summary>
+    /// <remarks>
+    /// Uses source-generated metadata when available (AOT-compatible), falling back to reflection otherwise.
+    /// Exceptions during property access are propagated to the caller with context about
+    /// which type/property failed. This ensures data source initialization failures are
+    /// properly reported as test failures rather than silently swallowed.
+    /// </remarks>
+    [UnconditionalSuppressMessage("Trimming", "IL2026", Justification = "Reflection fallback for nested initializers. In AOT, source-gen handles primary discovery.")]
+    [UnconditionalSuppressMessage("Trimming", "IL2070", Justification = "Reflection fallback for nested initializers. In AOT, source-gen handles primary discovery.")]
+    [UnconditionalSuppressMessage("Trimming", "IL2075", Justification = "Reflection fallback for nested initializers. In AOT, source-gen handles primary discovery.")]
+    private static void TraverseInitializerProperties(
+        object obj,
+        TryAddObjectFunc tryAdd,
+        RecurseFunc recurse,
+        int currentDepth,
+        CancellationToken cancellationToken)
+    {
+        var type = obj.GetType();
+
+        if (ShouldSkipType(type))
+        {
+            return;
+        }
+
+        // Fetch the pre-flattened source-gen property list for this type. The flattening
+        // walks the inheritance chain once and caches the deduplicated result, so per-test
+        // traversal does not re-walk BaseType nor allocate a HashSet<string>.
+        var flattened = GetFlattenedInitializerProperties(type);
+
+        if (flattened != null)
+        {
+            TraverseFlattenedInitializerProperties(obj, type, flattened, tryAdd, recurse, currentDepth, cancellationToken);
+            return;
+        }
+
+        // No source-gen registration anywhere in the hierarchy → fall back to reflection.
+        TraverseInitializerPropertiesViaReflection(obj, type, tryAdd, recurse, currentDepth, cancellationToken);
+    }
+
+    /// <summary>
+    /// Returns the cached flattened InitializerPropertyInfo[] for a type (inheritance-walked,
+    /// derived-first precedence, deduplicated by property name). Returns null when no
+    /// source-gen registration exists in the type's inheritance chain.
+    /// </summary>
+    private static InitializerPropertyInfo[]? GetFlattenedInitializerProperties(Type type)
+        => FlattenedInitializerPropertiesCache.GetOrAdd(type, static t =>
+        {
+            List<InitializerPropertyInfo>? merged = null;
+            HashSet<string>? seen = null;
+
+            for (var currentType = t; currentType != null && currentType != typeof(object); currentType = currentType.BaseType)
+            {
+                var registered = InitializerPropertyRegistry.GetProperties(currentType);
+                if (registered == null)
+                {
+                    continue;
+                }
+
+                merged ??= new List<InitializerPropertyInfo>(registered.Length);
+                seen ??= new HashSet<string>(StringComparer.Ordinal);
+
+                foreach (var p in registered)
+                {
+                    if (seen.Add(p.PropertyName))
+                    {
+                        merged.Add(p);
+                    }
+                }
+            }
+
+            return merged?.ToArray();
+        });
+
+    /// <summary>
+    /// Traverses the pre-flattened source-generated IAsyncInitializer properties.
+    /// No per-call inheritance walk or HashSet allocation — that work was done once
+    /// during flattening and cached in <see cref="FlattenedInitializerPropertiesCache"/>.
+    /// </summary>
+    private static void TraverseFlattenedInitializerProperties(
+        object obj,
+        Type type,
+        InitializerPropertyInfo[] properties,
+        TryAddObjectFunc tryAdd,
+        RecurseFunc recurse,
+        int currentDepth,
+        CancellationToken cancellationToken)
+    {
+        foreach (var propInfo in properties)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            try
+            {
+                var value = propInfo.GetValue(obj);
+                if (value == null)
+                {
+                    continue;
+                }
+
+                if (value is IAsyncInitializer && tryAdd(value, currentDepth))
+                {
+                    recurse(value, currentDepth + 1);
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                DiscoveryErrors.Add(new DiscoveryError(type.Name, propInfo.PropertyName, ex.Message, ex));
+
+                throw DataSourceException.FromNestedFailure(
+                    $"Failed to access property '{propInfo.PropertyName}' on type '{type.Name}' during object graph discovery. " +
+                    $"This may indicate that a data source or its nested dependencies failed to initialize. " +
+                    $"See inner exception for details.",
+                    ex);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Traverses IAsyncInitializer properties using reflection (fallback for non-source-generated types).
+    /// </summary>
+    [UnconditionalSuppressMessage("Trimming", "IL2067", Justification = "Reflection fallback path. Types without source-generated metadata may not work in trimmed apps.")]
+    private static void TraverseInitializerPropertiesViaReflection(
+        object obj,
+        Type type,
+        TryAddObjectFunc tryAdd,
+        RecurseFunc recurse,
+        int currentDepth,
+        CancellationToken cancellationToken)
+    {
+        var properties = PropertyCacheManager.GetCachedProperties(type);
+
+        foreach (var property in properties)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            // Only access properties whose declared type could be IAsyncInitializer.
+            // This prevents triggering side effects from unrelated property getters
+            // (e.g., WebApplicationFactory.Server which starts the test host when accessed).
+            // Properties typed as object/interfaces not extending IAsyncInitializer won't be
+            // checked - users should properly type their properties or use data source attributes.
+            if (!typeof(IAsyncInitializer).IsAssignableFrom(property.PropertyType))
+            {
+                continue;
+            }
+
+            try
+            {
+                var value = property.GetValue(obj);
+                if (value == null)
+                {
+                    continue;
+                }
+
+                // Only discover IAsyncInitializer objects
+                if (value is IAsyncInitializer && tryAdd(value, currentDepth))
+                {
+                    recurse(value, currentDepth + 1);
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                throw; // Propagate cancellation
+            }
+            catch (Exception ex)
+            {
+                // Record error for diagnostics (still available via GetDiscoveryErrors())
+                DiscoveryErrors.Add(new DiscoveryError(type.Name, property.Name, ex.Message, ex));
+
+                // Propagate the exception with context about which property failed
+                // This ensures data source failures are reported as test failures
+                throw DataSourceException.FromNestedFailure(
+                    $"Failed to access property '{property.Name}' on type '{type.Name}' during object graph discovery. " +
+                    $"This may indicate that a data source or its nested dependencies failed to initialize. " +
+                    $"See inner exception for details.",
+                    ex);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Collects root-level objects (class args, method args, properties) from test details.
+    /// Eliminates duplicate loops in DiscoverObjectGraph and DiscoverAndTrackObjects.
+    /// </summary>
+    /// <remarks>
+    /// For injected properties, only DIRECT test class properties (including inherited) are added at depth 0.
+    /// Nested properties (properties of injected objects) are discovered through normal
+    /// graph traversal at appropriate depths (1+), ensuring correct initialization order
+    /// for nested IAsyncInitializer dependencies. See GitHub issue #4032.
+    /// </remarks>
+    private static void CollectRootObjects(
+        TestDetails testDetails,
+        TryAddObjectFunc tryAdd,
+        RootObjectCallback onRootObjectAdded,
+        CancellationToken cancellationToken)
+    {
+        // Process class arguments
+        ProcessRootCollection(testDetails.TestClassArguments, tryAdd, onRootObjectAdded, cancellationToken);
+
+        // Process method arguments
+        ProcessRootCollection(testDetails.TestMethodArguments, tryAdd, onRootObjectAdded, cancellationToken);
+
+        // Build set of types in the test class hierarchy (for identifying direct properties)
+        var hierarchyTypes = GetTypeHierarchy(testDetails.ClassType);
+
+        // Process ONLY direct test class injected properties at depth 0.
+        // Nested properties will be discovered through normal graph traversal at depth 1+.
+        // This ensures proper initialization order for nested IAsyncInitializer dependencies.
+        foreach (var kvp in testDetails.TestClassInjectedPropertyArguments)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            if (kvp.Value == null)
+            {
+                continue;
+            }
+
+            // Check if this property belongs to the test class hierarchy (not nested object properties)
+            // Cache key format: "{DeclaringType.FullName}.{PropertyName}"
+            if (IsDirectProperty(kvp.Key, hierarchyTypes))
+            {
+                if (tryAdd(kvp.Value, 0))
+                {
+                    onRootObjectAdded(kvp.Value);
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// Cache of type hierarchy sets keyed by <see cref="Type"/>. Per-type hierarchy is invariant,
+    /// and each invocation otherwise allocates a fresh <see cref="HashSet{T}"/> of strings.
+    /// Populated on first access per type and read-only thereafter. The stored
+    /// <see cref="HashSet{T}"/> instance is shared — callers MUST treat it as read-only.
+    /// (Not typed as <c>IReadOnlySet{T}</c> because netstandard2.0 lacks the interface and
+    /// the only consumer, <see cref="IsDirectProperty"/>, needs the concrete type for
+    /// <see cref="HashSet{T}.GetAlternateLookup"/> on newer TFMs.)
+    /// </summary>
+    private static readonly ConcurrentDictionary<Type, HashSet<string>> TypeHierarchyCache = new();
+
+    /// <summary>
+    /// Gets all types in the inheritance hierarchy from the given type up to (but not including) object.
+    /// The returned <see cref="HashSet{T}"/> is shared across callers and MUST NOT be mutated.
+    /// </summary>
+    private static HashSet<string> GetTypeHierarchy(Type type)
+        => TypeHierarchyCache.GetOrAdd(type, static t =>
+        {
+            var result = new HashSet<string>();
+            var currentType = t;
+
+            while (currentType != null && currentType != typeof(object))
+            {
+                if (currentType.FullName != null)
+                {
+                    result.Add(currentType.FullName);
+                }
+
+                currentType = currentType.BaseType;
+            }
+
+            return result;
+        });
+
+    /// <summary>
+    /// Determines if a cache key represents a direct property (belonging to test class hierarchy)
+    /// vs a nested property (belonging to an injected object).
+    /// Cache key format: "{DeclaringType.FullName}.{PropertyName}"
+    /// </summary>
+    private static bool IsDirectProperty(string cacheKey, HashSet<string> hierarchyTypes)
+    {
+        // Find the last dot to separate type from property name
+        var lastDotIndex = cacheKey.LastIndexOf('.');
+        if (lastDotIndex <= 0)
+        {
+            return true; // Malformed key, treat as direct
+        }
+
+#if NET9_0_OR_GREATER
+        var declaringTypeName = cacheKey.AsSpan()[..lastDotIndex];
+        return hierarchyTypes.GetAlternateLookup<ReadOnlySpan<char>>().Contains(declaringTypeName);
+#else
+        var declaringTypeName = cacheKey.Substring(0, lastDotIndex);
+        return hierarchyTypes.Contains(declaringTypeName);
+#endif
+    }
+
+    /// <summary>
+    /// Processes a collection of root objects, adding them to the graph and invoking callback.
+    /// Extracted to eliminate duplicate iteration patterns in CollectRootObjects.
+    /// </summary>
+    private static void ProcessRootCollection<T>(
+        IEnumerable<T> collection,
+        TryAddObjectFunc tryAdd,
+        RootObjectCallback onRootObjectAdded,
+        CancellationToken cancellationToken)
+    {
+        foreach (var item in collection)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (item != null && tryAdd(item, 0))
+            {
+                onRootObjectAdded(item);
+            }
+        }
+    }
+
+    #endregion
+}

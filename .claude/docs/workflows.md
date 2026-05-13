@@ -1,0 +1,129 @@
+# Development Workflows
+
+---
+
+## Common Commands
+
+```bash
+# Build (fast inner loop — use dev solution, separate restore, graph scheduling)
+dotnet restore TUnit.Dev.slnx
+dotnet build TUnit.Dev.slnx --no-restore -graphBuild:True
+
+# Build with centralized output layout
+dotnet build TUnit.Dev.slnx --no-restore -graphBuild:True --artifacts-path artifacts
+
+# Build full solution (CI or pre-commit)
+dotnet restore TUnit.slnx
+dotnet build TUnit.slnx --no-restore -graphBuild:True
+
+# Run all tests (excludes TUnit.TestProject)
+dotnet test
+
+# Snapshot tests
+dotnet test TUnit.Core.SourceGenerator.Tests
+dotnet test TUnit.PublicAPI
+
+# Run specific test
+dotnet test --treenode-filter "/*/*/ClassName/*"
+
+# Build release
+dotnet build -c Release
+
+# Test AOT compatibility
+dotnet publish -c Release -p:PublishAot=true --use-current-runtime
+```
+
+---
+
+## Performance Testing
+
+Run benchmarks when changing hot paths (test discovery, execution, data generation).
+
+```bash
+# Core performance benchmarks (BenchmarkDotNet)
+cd TUnit.Performance.Tests
+dotnet run -c Release
+
+# Source generator benchmarks
+cd TUnit.SourceGenerator.Benchmarks
+dotnet run -c Release
+
+# Large-scale performance validation
+cd TUnit.PerformanceBenchmarks
+dotnet run -c Release
+```
+
+**When to run**:
+- Before/after changes to test discovery
+- Before/after changes to test execution
+- Before/after changes to argument expansion
+- Before/after caching or reflection changes
+
+---
+
+## TUnit.TestProject Filters
+
+Many tests in `TUnit.TestProject` are designed to fail (testing error scenarios). Always use filters.
+
+### Filter Syntax
+
+```bash
+# Single test
+--treenode-filter "/TUnit.TestProject/Namespace/ClassName/TestMethodName"
+
+# All tests in a class
+--treenode-filter "/*/*/ClassName/*"
+
+# Exclude by category
+--treenode-filter "/*/*/*/*[Category!=Performance]"
+```
+
+### Run Filters One at a Time
+
+OR patterns (`Pattern1|Pattern2`) can match thousands of unintended tests.
+
+```bash
+# Wrong - matches too broadly
+--treenode-filter "/*/*/ClassA/*|/*/*/ClassB/*"
+
+# Correct - separate commands
+dotnet test --treenode-filter "/*/*/ClassA/*"
+dotnet test --treenode-filter "/*/*/ClassB/*"
+```
+
+---
+
+## Adding a New Feature
+
+1. Write tests FIRST (TDD)
+2. Does it change core engine metadata collection?
+   - YES: Implement in BOTH source-gen AND reflection
+   - NO: Use unified code path
+3. Implement in `TUnit.Core` if new abstractions needed
+4. Add analyzer rule if misuse is possible
+5. Run all tests: `dotnet test`
+6. Accept snapshots if needed (see `CLAUDE.md`)
+7. Benchmark if touching hot paths
+8. Test AOT if using reflection
+
+---
+
+## Fixing a Bug
+
+1. Write failing test that reproduces the bug
+2. Identify if it affects metadata collection (dual-mode)
+3. Fix in both source generator and reflection engine if needed
+4. Run full test suite: `dotnet test`
+5. Accept snapshots if applicable
+
+---
+
+## Pre-Commit Checklist
+
+- [ ] All tests pass: `dotnet test`
+- [ ] If source generator changed: ran snapshot tests, committed `.verified.txt`
+- [ ] If public API changed: ran `TUnit.PublicAPI`, committed `.verified.txt`
+- [ ] If dual-mode feature: implemented in both modes, tested both
+- [ ] If performance-critical: profiled before/after
+- [ ] If using reflection: tested AOT, added annotations
+- [ ] No `.received.txt` files staged

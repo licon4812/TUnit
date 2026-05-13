@@ -3,9 +3,30 @@
   "isRoot": true,
   "tools": {
     "microsoft.templateengine.authoring.cli": {
-      "version": "9.0.302",
+      "version": "10.0.300",
       "commands": [
         "dotnet-template-authoring"
+      ],
+      "rollForward": false
+    },
+    "verify.tool": {
+      "version": "0.7.0",
+      "commands": [
+        "dotnet-verify"
+      ],
+      "rollForward": true
+    },
+    "dotnet-trace": {
+      "version": "9.0.661903",
+      "commands": [
+        "dotnet-trace"
+      ],
+      "rollForward": true
+    },
+    "gitversion.tool": {
+      "version": "6.7.0",
+      "commands": [
+        "dotnet-gitversion"
       ],
       "rollForward": false
     }

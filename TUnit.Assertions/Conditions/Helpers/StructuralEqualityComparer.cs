@@ -1,0 +1,129 @@
+using System.Collections;
+using System.Diagnostics.CodeAnalysis;
+
+namespace TUnit.Assertions.Conditions.Helpers;
+
+/// <summary>
+/// An equality comparer that performs structural equivalency comparison for complex objects.
+/// For primitive types, strings, dates, enums, and IEquatable types, uses standard equality.
+/// For complex objects, performs deep comparison of properties and fields.
+/// </summary>
+/// <typeparam name="T">The type of objects to compare</typeparam>
+[RequiresUnreferencedCode("Structural equality comparison uses reflection to access object members and is not compatible with AOT")]
+public sealed class StructuralEqualityComparer<T> : IEqualityComparer<T>
+{
+    /// <summary>
+    /// Singleton instance of the structural equality comparer.
+    /// </summary>
+    public static readonly StructuralEqualityComparer<T> Instance = new();
+
+    private StructuralEqualityComparer()
+    {
+    }
+
+    public bool Equals(T? x, T? y)
+    {
+        if (x == null && y == null)
+        {
+            return true;
+        }
+
+        if (x == null || y == null)
+        {
+            return false;
+        }
+
+        var type = typeof(T);
+
+        if (TypeHelper.IsPrimitiveOrWellKnownType(type))
+        {
+            return EqualityComparer<T>.Default.Equals(x, y);
+        }
+
+        return CompareStructurally(x, y, new HashSet<object>(ReferenceEqualityComparer<object>.Instance));
+    }
+
+    public int GetHashCode(T obj)
+    {
+        if (obj == null)
+        {
+            return 0;
+        }
+
+        return EqualityComparer<T>.Default.GetHashCode(obj);
+    }
+
+    [UnconditionalSuppressMessage("Trimming", "IL2072", Justification = "GetType() is acceptable for runtime structural comparison")]
+    private bool CompareStructurally(object? x, object? y, HashSet<object> visited)
+    {
+        if (x == null && y == null)
+        {
+            return true;
+        }
+
+        if (x == null || y == null)
+        {
+            return false;
+        }
+
+        var xType = x.GetType();
+        var yType = y.GetType();
+
+        if (TypeHelper.IsPrimitiveOrWellKnownType(xType))
+        {
+            return Equals(x, y);
+        }
+
+        if (visited.Contains(x))
+        {
+            return true;
+        }
+
+        visited.Add(x);
+
+        if (x is IEnumerable xEnumerable && y is IEnumerable yEnumerable
+            && x is not string && y is not string)
+        {
+            var xList = xEnumerable.Cast<object?>().ToList();
+            var yList = yEnumerable.Cast<object?>().ToList();
+
+            if (xList.Count != yList.Count)
+            {
+                return false;
+            }
+
+            for (int i = 0; i < xList.Count; i++)
+            {
+                if (!CompareStructurally(xList[i], yList[i], visited))
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        var members = ReflectionHelper.GetMembersToCompare(xType);
+
+        // When there are no public members to compare structurally (e.g., types with only
+        // private state), fall back to Equals(). This respects IEquatable<T> implementations
+        // and avoids false positives from empty member lists.
+        if (members.Length == 0)
+        {
+            return Equals(x, y);
+        }
+
+        foreach (var member in members)
+        {
+            var xValue = ReflectionHelper.GetMemberValue(x, member);
+            var yValue = ReflectionHelper.GetMemberValue(y, member);
+
+            if (!CompareStructurally(xValue, yValue, visited))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+}

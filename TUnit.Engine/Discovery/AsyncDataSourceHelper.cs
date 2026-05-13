@@ -1,4 +1,5 @@
 using System.Diagnostics.CodeAnalysis;
+using TUnit.Core.Helpers;
 
 namespace TUnit.Engine.Discovery;
 
@@ -6,6 +7,9 @@ namespace TUnit.Engine.Discovery;
 internal static class AsyncDataSourceHelper
 {
     /// Processes async generator items without evaluating them during discovery
+#if NET8_0_OR_GREATER
+    [RequiresUnreferencedCode("Typed placeholder creation uses reflection on generic types")]
+#endif
     public static List<object?[]> ProcessAsyncGeneratorItemsForDiscovery(object? item)
     {
         var items = new List<object?[]>();
@@ -108,7 +112,9 @@ internal static class AsyncDataSourceHelper
         return returnType;
     }
     
-    [UnconditionalSuppressMessage("Trimming", "IL2075:Target method return value does not satisfy annotation requirements", Justification = "Reflection mode requires dynamic access")]
+#if NET8_0_OR_GREATER
+    [RequiresUnreferencedCode("Typed placeholder creation uses reflection on generic types")]
+#endif
     private static AsyncDataSourcePlaceholder CreateTypedPlaceholder(object item, Type? resultType)
     {
         // Create a wrapper that preserves the typed factory
@@ -154,9 +160,9 @@ internal static class AsyncDataSourceHelper
         else if (item != null)
         {
             // Try tuple parsing
-            if (global::TUnit.Engine.Helpers.TupleHelper.TryParseTupleToObjectArray(item, out var tupleValues))
+            if (TupleHelper.IsTupleType(item))
             {
-                items.Add(tupleValues!);
+                items.Add(TupleHelper.UnwrapTuple(item));
             }
             else
             {

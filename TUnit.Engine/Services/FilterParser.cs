@@ -3,7 +3,7 @@ using Microsoft.Testing.Platform.Requests;
 
 namespace TUnit.Engine.Services;
 
-public class FilterParser
+internal class FilterParser
 {
     private string? _stringFilter;
 
@@ -21,12 +21,13 @@ public class FilterParser
     }
 
 #pragma warning disable TPEXP
-    public static string? StringifyFilter(ITestExecutionFilter filter)
+    public static string? StringifyFilter(ITestExecutionFilter? filter)
     {
         return filter switch
         {
+            null => null,
             NopFilter => null,
-            TestNodeUidListFilter testNodeUidListFilter => string.Join(",",
+            TestNodeUidListFilter testNodeUidListFilter => string.Join(',',
                 testNodeUidListFilter.TestNodeUids.Select(x => x.Value)),
             TreeNodeFilter treeNodeFilter => treeNodeFilter.Filter,
             _ => throw new ArgumentOutOfRangeException(nameof(filter))

@@ -1,5 +1,6 @@
 ﻿using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
+using TUnit.Core.Helpers;
 
 namespace TUnit.Core;
 
@@ -10,7 +11,11 @@ public class ClassHookContext : Context
     public static new ClassHookContext? Current
     {
         get => Contexts.Value;
-        internal set => Contexts.Value = value;
+        internal set
+        {
+            Contexts.Value = value;
+            AssemblyHookContext.Current = value?.AssemblyContext;
+        }
     }
 
     internal ClassHookContext(AssemblyHookContext assemblyHookContext) : base(assemblyHookContext)
@@ -23,18 +28,23 @@ public class ClassHookContext : Context
     [DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicConstructors | DynamicallyAccessedMemberTypes.PublicProperties | DynamicallyAccessedMemberTypes.PublicMethods)]
     public required Type ClassType { get; init; }
 
+    private readonly Lock _lock = new();
+    private readonly HashSet<TestContext> _testSet = new(ReferenceEqualityComparer<TestContext>.Instance);
     private readonly List<TestContext> _tests = [];
 
     public void AddTest(TestContext testContext)
     {
-        if (_tests.Contains(testContext))
+        lock (_lock)
         {
-            return; // Prevent duplicates
+            if (!_testSet.Add(testContext))
+            {
+                return; // Prevent duplicates
+            }
+            _tests.Add(testContext);
         }
-        _tests.Add(testContext);
     }
 
-    public IReadOnlyList<TestContext> Tests => _tests;
+    public IReadOnlyList<TestContext> Tests { get { lock (_lock) return [.. _tests]; } }
 
     public int TestCount => Tests.Count;
     internal bool FirstTestStarted { get; set; }
@@ -71,15 +81,21 @@ public class ClassHookContext : Context
 
     internal void RemoveTest(TestContext test)
     {
-        _tests.Remove(test);
+        bool empty;
+        lock (_lock)
+        {
+            _testSet.Remove(test);
+            _tests.Remove(test);
+            empty = _tests.Count is 0;
+        }
 
-        if (_tests.Count is 0)
+        if (empty)
         {
             AssemblyContext.RemoveClass(this);
         }
     }
 
-    internal override void RestoreContextAsyncLocal()
+    internal override void SetAsyncLocalContext()
     {
         Current = this;
     }

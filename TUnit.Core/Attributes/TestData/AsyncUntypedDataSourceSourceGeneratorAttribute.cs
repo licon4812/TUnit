@@ -1,27 +1,20 @@
-using System.Diagnostics.CodeAnalysis;
+﻿using System.Diagnostics.CodeAnalysis;
 
 namespace TUnit.Core;
 
 [AttributeUsage(AttributeTargets.Method | AttributeTargets.Class | AttributeTargets.Property, AllowMultiple = true)]
-[RequiresDynamicCode("AsyncUntypedDataSourceGeneratorAttribute requires dynamic code generation for runtime data source creation. Consider using strongly-typed AsyncDataSourceGeneratorAttribute<T> overloads for AOT compatibility.")]
-[RequiresUnreferencedCode("AsyncUntypedDataSourceGeneratorAttribute may require unreferenced code for runtime data source creation. Consider using strongly-typed AsyncDataSourceGeneratorAttribute<T> overloads for AOT compatibility.")]
 public abstract class AsyncUntypedDataSourceGeneratorAttribute : Attribute, IAsyncUntypedDataSourceGeneratorAttribute
 {
+    /// <inheritdoc />
+    public virtual bool SkipIfEmpty { get; set; }
+
     protected abstract IAsyncEnumerable<Func<Task<object?[]?>>> GenerateDataSourcesAsync(DataGeneratorMetadata dataGeneratorMetadata);
 
-    public async IAsyncEnumerable<Func<Task<object?[]?>>> GenerateAsync(DataGeneratorMetadata dataGeneratorMetadata)
+    public IAsyncEnumerable<Func<Task<object?[]?>>> GenerateAsync(DataGeneratorMetadata dataGeneratorMetadata)
     {
-        if (dataGeneratorMetadata.TestBuilderContext != null && dataGeneratorMetadata.TestInformation != null)
-        {
-            await PropertyInjectionService.InjectPropertiesIntoObjectAsync(this, dataGeneratorMetadata.TestBuilderContext.Current.ObjectBag, dataGeneratorMetadata.TestInformation, dataGeneratorMetadata.TestBuilderContext.Current.Events);
-        }
-
-        await ObjectInitializer.InitializeAsync(this);
-
-        await foreach (var generateDataSource in GenerateDataSourcesAsync(dataGeneratorMetadata))
-        {
-            yield return generateDataSource;
-        }
+        // Data source initialization is now handled externally by DataSourceInitializer
+        // This follows SRP - the attribute is only responsible for generating data, not initialization
+        return GenerateDataSourcesAsync(dataGeneratorMetadata);
     }
 
     public IAsyncEnumerable<Func<Task<object?[]?>>> GetDataRowsAsync(DataGeneratorMetadata dataGeneratorMetadata)

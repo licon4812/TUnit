@@ -19,37 +19,37 @@
         <value>System.Resources.ResXResourceWriter, System.Windows.Forms, Version=2.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
     </resheader>
     <data name="TUnitAssertions0001Description" xml:space="preserve">
-        <value>Don't mix 'Or' &amp; 'And' operators in assertions.</value>
+        <value>Mixing 'Or' and 'And' operators in assertions can create ambiguous logic. Use parentheses to clarify operator precedence and make the assertion intent clear.</value>
     </data>
     <data name="TUnitAssertions0001MessageFormat" xml:space="preserve">
-        <value>Don't mix 'Or' &amp; 'And' operators in assertions</value>
+        <value>Don't mix 'Or' &amp; 'And' operators in assertions - use parentheses to clarify precedence</value>
     </data>
     <data name="TUnitAssertions0001Title" xml:space="preserve">
-        <value>Don't mix 'Or' &amp; 'And' operators in assertions</value>
+        <value>Mixed 'Or' and 'And' operators in assertion</value>
     </data>
     <data name="TUnitAssertions0001CodeFixTitle" xml:space="preserve">
         <value>Don't mix 'Or' &amp; 'And' operators in assertions</value><comment>The title of the code fix.</comment>
     </data>
     <data name="TUnitAssertions0002Description" xml:space="preserve">
-        <value>Assert statements must be awaited.</value>
+        <value>All TUnit assertions return Task and must be awaited. Add 'await' before the assertion statement.</value>
     </data>
     <data name="TUnitAssertions0002MessageFormat" xml:space="preserve">
-        <value>Assert statements must be awaited</value>
+        <value>Assert statements must be awaited - all TUnit assertions return Task</value>
     </data>
     <data name="TUnitAssertions0002Title" xml:space="preserve">
-        <value>Assert statements must be awaited</value>
+        <value>Assert statement not awaited</value>
     </data>
     <data name="TUnitAssertions0002CodeFixTitle" xml:space="preserve">
         <value>Assert statements must be awaited</value><comment>The title of the code fix.</comment>
     </data>
     <data name="TUnitAssertions0003Description" xml:space="preserve">
-        <value>Do not populate this argument. The compiler will do this.</value>
+        <value>CallerArgumentExpression parameters are automatically populated by the compiler. Remove manually provided values to allow proper expression capture.</value>
     </data>
     <data name="TUnitAssertions0003MessageFormat" xml:space="preserve">
-        <value>Do not populate this argument. The compiler will do this</value>
+        <value>Don't provide CallerArgumentExpression parameter values - let the compiler handle it</value>
     </data>
     <data name="TUnitAssertions0003Title" xml:space="preserve">
-        <value>Compiler argument populated</value>
+        <value>Manual CallerArgumentExpression parameter provided</value>
     </data>
     <data name="TUnitAssertions0004Description" xml:space="preserve">
         <value>Assert.Multiple needs a `using` before it.</value>
@@ -104,5 +104,71 @@
     </data>
     <data name="TUnitAssertions0009Title" xml:space="preserve">
         <value>xUnit assertion can be converted to TUnit assertion</value>
+    </data>
+    <data name="TUnitAssertions0010Description" xml:space="preserve">
+        <value>Methods decorated with [GenerateAssertion] must be static to be used as assertion methods.</value>
+    </data>
+    <data name="TUnitAssertions0010MessageFormat" xml:space="preserve">
+        <value>Method '{0}' decorated with [GenerateAssertion] must be static</value>
+    </data>
+    <data name="TUnitAssertions0010Title" xml:space="preserve">
+        <value>[GenerateAssertion] method must be static</value>
+    </data>
+    <data name="TUnitAssertions0011Description" xml:space="preserve">
+        <value>Methods decorated with [GenerateAssertion] must have at least one parameter (the value to assert on).</value>
+    </data>
+    <data name="TUnitAssertions0011MessageFormat" xml:space="preserve">
+        <value>Method '{0}' decorated with [GenerateAssertion] must have at least one parameter</value>
+    </data>
+    <data name="TUnitAssertions0011Title" xml:space="preserve">
+        <value>[GenerateAssertion] method must have at least one parameter</value>
+    </data>
+    <data name="TUnitAssertions0012Description" xml:space="preserve">
+        <value>Methods decorated with [GenerateAssertion] must return bool, AssertionResult, Task&lt;bool&gt;, or Task&lt;AssertionResult&gt;.</value>
+    </data>
+    <data name="TUnitAssertions0012MessageFormat" xml:space="preserve">
+        <value>Method '{0}' decorated with [GenerateAssertion] must return bool, AssertionResult, Task&lt;bool&gt;, or Task&lt;AssertionResult&gt;</value>
+    </data>
+    <data name="TUnitAssertions0012Title" xml:space="preserve">
+        <value>[GenerateAssertion] method has invalid return type</value>
+    </data>
+    <data name="TUnitAssertions0013Description" xml:space="preserve">
+        <value>Methods decorated with [GenerateAssertion] should use extension method syntax (first parameter with 'this') for better usability.</value>
+    </data>
+    <data name="TUnitAssertions0013MessageFormat" xml:space="preserve">
+        <value>Method '{0}' decorated with [GenerateAssertion] should use extension method syntax (add 'this' to first parameter)</value>
+    </data>
+    <data name="TUnitAssertions0013Title" xml:space="preserve">
+        <value>[GenerateAssertion] method should be an extension method</value>
+    </data>
+    <data name="TUnitAssertions0014Description" xml:space="preserve">
+        <value>Use .IsNull() instead of .IsEqualTo(null) for clearer intent and better error messages.</value>
+    </data>
+    <data name="TUnitAssertions0014MessageFormat" xml:space="preserve">
+        <value>Use .IsNull() instead of .IsEqualTo(null)</value>
+    </data>
+    <data name="TUnitAssertions0014Title" xml:space="preserve">
+        <value>Prefer IsNull() over IsEqualTo(null)</value>
+    </data>
+    <data name="TUnitAssertions0015Description" xml:space="preserve">
+        <value>Use .IsTrue() or .IsFalse() instead of .IsEqualTo(true) or .IsEqualTo(false) for clearer intent and better error messages.</value>
+    </data>
+    <data name="TUnitAssertions0015MessageFormat" xml:space="preserve">
+        <value>Use .{0}() instead of .IsEqualTo({1})</value>
+    </data>
+    <data name="TUnitAssertions0015Title" xml:space="preserve">
+        <value>Prefer IsTrue()/IsFalse() over IsEqualTo(true/false)</value>
+    </data>
+    <data name="TUnitAssertions0016Description" xml:space="preserve">
+        <value>`.IsEqualTo(...)` on a collection uses reference equality because collection types don't override `Equals`. Use `.IsEquivalentTo(...)` to compare contents.</value>
+    </data>
+    <data name="TUnitAssertions0016MessageFormat" xml:space="preserve">
+        <value>`.IsEqualTo(...)` on a collection compares by reference - use `.IsEquivalentTo(...)` to compare contents</value>
+    </data>
+    <data name="TUnitAssertions0016Title" xml:space="preserve">
+        <value>Collection `.IsEqualTo(...)` compares by reference</value>
+    </data>
+    <data name="TUnitAssertions0016CodeFixTitle" xml:space="preserve">
+        <value>Replace `.IsEqualTo(...)` with `.IsEquivalentTo(...)`</value>
     </data>
 </root>

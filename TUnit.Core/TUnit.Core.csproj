@@ -5,6 +5,14 @@
     <ItemGroup>
         <InternalsVisibleTo Include="TUnit.Engine" />
         <InternalsVisibleTo Include="TUnit.UnitTests" />
+        <InternalsVisibleTo Include="TUnit.AspNetCore.Core" />
+        <InternalsVisibleTo Include="TUnit.Logging.Microsoft" />
+        <InternalsVisibleTo Include="TUnit.Aspire" />
+        <InternalsVisibleTo Include="TUnit.Aspire.Tests" />
+        <InternalsVisibleTo Include="TUnit.OpenTelemetry" />
+        <InternalsVisibleTo Include="TUnit.OpenTelemetry.Tests" />
+        <InternalsVisibleTo Include="TUnit.Engine.Tests" />
+        <InternalsVisibleTo Include="TUnit.Playwright" />
     </ItemGroup>
 
     <ItemGroup>
@@ -57,16 +65,16 @@
             Include="$(MSBuildProjectDirectory)\..\TUnit.Core.SourceGenerator.Roslyn414\bin\$(Configuration)\netstandard2.0\TUnit.Core.SourceGenerator.dll"
             Pack="true" PackagePath="analyzers/dotnet/roslyn4.14/cs" Visible="false" />
     </ItemGroup>
-    <ItemGroup>
-        <PackageReference Remove="Backport.System.Threading.Lock" />
-    </ItemGroup>
     <ItemGroup Condition="'$(TargetFramework)' == 'netstandard2.0'">
         <PackageReference Include="Microsoft.CSharp" />
-        <PackageReference Include="System.Text.Json" VersionOverride="9.0.7" />
-        <PackageReference Include="Microsoft.Bcl.AsyncInterfaces" VersionOverride="9.0.7" />
+        <PackageReference Include="System.Text.Json" />
+        <PackageReference Include="System.Collections.Immutable" />
     </ItemGroup>
     <ItemGroup>
       <Compile Remove="IClassDataSourceAttribute.cs" />
       <Compile Remove="Interfaces\INestedClassDataSourceInitializer.cs" />
     </ItemGroup>
+
+  <Import Project="..\Library.targets" />
+
 </Project>

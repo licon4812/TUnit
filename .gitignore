@@ -3,6 +3,9 @@
 ##
 ## Get latest from https://github.com/github/gitignore/blob/main/VisualStudio.gitignore
 
+# Profiling output
+.profile/
+
 # User-specific files
 *.rsuser
 *.suo
@@ -284,6 +287,7 @@ FakesAssemblies/
 # Node.js Tools for Visual Studio
 .ntvs_analysis.dat
 node_modules/
+package-lock.json
 
 # Visual Studio 6 build log
 *.plg
@@ -396,6 +400,7 @@ FodyWeavers.xsd
 
 # JetBrains Rider
 *.sln.iml
+.idea/
 
 # Generated Code
 *.g.cs
@@ -417,7 +422,28 @@ TUnit.TestProject/TestSession*.txt
 .mcp.json
 requirements
 
-TESTPROJECT_AOT
-TESTPROJECT_SINGLEFILE
+TESTPROJECT_AOT*
+TESTPROJECT_SINGLEFILE*
+MOCKTESTS_AOT*
+NUGETTESTER_AOT*
 
 nul
+
+# Claude Code settings
+.claude/settings.local.json
+.claude/agents
+
+# Documentation plans
+docs/plans/
+
+# Speedscope profiling files
+*speedscope*.json
+
+# Dotnet trace files
+*.nettrace
+
+# Git worktrees
+.worktrees/
+
+# Speckit feature specs
+specs/

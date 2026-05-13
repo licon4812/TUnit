@@ -1,6 +1,4 @@
 ﻿using System.Diagnostics.CodeAnalysis;
-using TUnit.Assertions.AssertConditions.Throws;
-
 namespace TUnit.Assertions.Tests.Assertions.Delegates;
 
 public partial class Throws
@@ -11,59 +9,56 @@ public partial class Throws
         public async Task Fails_For_Code_With_Other_Exceptions()
         {
             var expectedMessage = """
-                                  Expected action to throw a CustomException
-                                  
-                                  but an OtherException was thrown
-                                  
+                                  Expected to throw CustomException
+                                  but threw OtherException
+
                                   at Assert.That(action).Throws<CustomException>()
-                                  """;
+                                  """.NormalizeLineEndings();
             Exception exception = CreateOtherException();
             Action action = () => throw exception;
 
             var sut = async ()
                 => await Assert.That(action).Throws<CustomException>();
 
-            await Assert.That(sut).ThrowsException()
-                .WithMessage(expectedMessage);
+            var thrownException = await Assert.That(sut).ThrowsException();
+            await Assert.That(thrownException.Message.NormalizeLineEndings()).IsEqualTo(expectedMessage);
         }
 
         [Test]
         public async Task Fails_For_Code_With_Supertype_Exceptions()
         {
             var expectedMessage = """
-                                  Expected action to throw a SubCustomException
-                                  
-                                  but a CustomException was thrown
-                                  
+                                  Expected to throw SubCustomException
+                                  but threw CustomException
+
                                   at Assert.That(action).Throws<SubCustomException>()
-                                  """;
+                                  """.NormalizeLineEndings();
             Exception exception = CreateCustomException();
             Action action = () => throw exception;
 
             var sut = async ()
                 => await Assert.That(action).Throws<SubCustomException>();
 
-            await Assert.That(sut).ThrowsException()
-                .WithMessage(expectedMessage);
+            var thrownException = await Assert.That(sut).ThrowsException();
+            await Assert.That(thrownException.Message.NormalizeLineEndings()).IsEqualTo(expectedMessage);
         }
 
         [Test]
         public async Task Fails_For_Code_Without_Exceptions()
         {
             var expectedMessage = """
-                                  Expected action to throw a CustomException
-                                  
-                                  but none was thrown
-                                  
+                                  Expected to throw CustomException
+                                  but no exception was thrown
+
                                   at Assert.That(action).Throws<CustomException>()
-                                  """;
+                                  """.NormalizeLineEndings();
             var action = () => { };
 
             var sut = async ()
                 => await Assert.That(action).Throws<CustomException>();
 
-            await Assert.That(sut).ThrowsException()
-                .WithMessage(expectedMessage);
+            var thrownException = await Assert.That(sut).ThrowsException();
+            await Assert.That(thrownException.Message.NormalizeLineEndings()).IsEqualTo(expectedMessage);
         }
 
         [Test]

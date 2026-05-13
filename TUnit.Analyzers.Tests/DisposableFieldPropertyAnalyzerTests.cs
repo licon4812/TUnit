@@ -494,4 +494,866 @@ public class DisposableFieldPropertyAnalyzerTests
                 """
             );
     }
+    
+    
+    [Test]
+    [Arguments("Class")]
+    [Arguments("Assembly")]
+    [Arguments("TestSession")]
+    public async Task Bug3213(string hook)
+    {
+        await Verifier
+            .VerifyAnalyzerAsync(
+                $$"""
+                  using System;
+                  using System.Linq;
+                  using System.Net;
+                  using System.Net.Http;
+                  using System.Threading;
+                  using System.Threading.Tasks;
+                  using TUnit.Core;
+
+                  record RegisterPaymentHttp(string BookingId, string RoomId, decimal Amount, DateTimeOffset PaidAt);
+                  record BookingState;
+                  class Result<T> { public class Ok { public HttpStatusCode StatusCode { get; set; } } }
+                  class BookingEvents { public record BookingFullyPaid(DateTimeOffset PaidAt); }
+                  class Booking { public object Payload { get; set; } = null!; }
+                  class RestRequest {
+                      public RestRequest(string path) { }
+                      public RestRequest AddJsonBody(object obj) => this;
+                  }
+                  class ServerFixture {
+                      public HttpClient GetClient() => null!;
+                      public static BookRoom GetBookRoom() => null!;
+                      public Task<System.Collections.Generic.IEnumerable<Booking>> ReadStream<T>(string id) => Task.FromResult(Enumerable.Empty<Booking>());
+                  }
+                  class BookRoom {
+                      public string BookingId => string.Empty;
+                      public string RoomId => string.Empty;
+                  }
+                  class TestEventListener : IDisposable {
+                      public void Dispose() { }
+                  }
+                  static class HttpClientExtensions {
+                      public static Task PostJsonAsync(this HttpClient client, string path, object body, CancellationToken cancellationToken) => Task.CompletedTask;
+                      public static Task<TResult> ExecutePostAsync<TResult>(this HttpClient client, RestRequest request, CancellationToken cancellationToken) => Task.FromResult<TResult>(default!);
+                  }
+                  static class ObjectExtensions {
+                      public static void ShouldBe(this object obj, object expected) { }
+                      public static void ShouldBeEquivalentTo(this object obj, object expected) { }
+                  }
+
+                  [ClassDataSource<string>]
+                  public class ControllerTests {
+                      readonly ServerFixture _fixture = null!;
+
+                      public ControllerTests(string value) {
+                      }
+                  
+                      [Test]
+                      public async Task RecordPaymentUsingMappedCommand(CancellationToken cancellationToken) {
+                          using var client = _fixture.GetClient();
+                  
+                          var bookRoom = ServerFixture.GetBookRoom();
+                  
+                          await client.PostJsonAsync("/book", bookRoom, cancellationToken: cancellationToken);
+                  
+                          var registerPayment = new RegisterPaymentHttp(bookRoom.BookingId, bookRoom.RoomId, 100, DateTimeOffset.Now);
+                  
+                          var request  = new RestRequest("/v2/pay").AddJsonBody(registerPayment);
+                          var response = await client.ExecutePostAsync<Result<BookingState>.Ok>(request, cancellationToken: cancellationToken);
+                          response.StatusCode.ShouldBe(HttpStatusCode.OK);
+                  
+                          var expected = new BookingEvents.BookingFullyPaid(registerPayment.PaidAt);
+                  
+                          var events = await _fixture.ReadStream<Booking>(bookRoom.BookingId);
+                          var last   = events.LastOrDefault();
+                          last!.Payload.ShouldBeEquivalentTo(expected);
+                      }
+                  
+                      static TestEventListener? listener;
+
+                      [After(HookType.{{hook}})]
+                      public static void Dispose() => listener?.Dispose();
+
+                      [Before(HookType.{{hook}})]
+                      public static void BeforeClass() => listener = new();
+                  }
+                  """
+            );
+    }
+
+    [Test]
+    public async Task New_Disposable_In_AsyncInitializer_Flags_Issue()
+    {
+        await Verifier
+            .VerifyAnalyzerAsync(
+                """
+                using System;
+                using System.Net.Http;
+                using System.Threading.Tasks;
+                using TUnit.Core;
+                using TUnit.Core.Interfaces;
+
+                public class DisposableFieldTests : IAsyncInitializer
+                {
+                    private HttpClient? {|#0:_httpClient|};
+
+                    public Task InitializeAsync()
+                    {
+                        _httpClient = new HttpClient();
+                        return Task.CompletedTask;
+                    }
+
+                    [Test]
+                    public void Test1()
+                    {
+                    }
+                }
+                """,
+
+                Verifier.Diagnostic(Rules.Dispose_Member_In_Cleanup)
+                    .WithLocation(0)
+                    .WithArguments("_httpClient")
+            );
+    }
+
+    [Test]
+    public async Task New_Disposable_In_AsyncInitializer_No_Issue_When_Cleaned_Up()
+    {
+        await Verifier
+            .VerifyAnalyzerAsync(
+                """
+                using System;
+                using System.Net.Http;
+                using System.Threading.Tasks;
+                using TUnit.Core;
+                using TUnit.Core.Interfaces;
+
+                public class DisposableFieldTests : IAsyncInitializer, IAsyncDisposable
+                {
+                    private HttpClient? _httpClient;
+
+                    public Task InitializeAsync()
+                    {
+                        _httpClient = new HttpClient();
+                        return Task.CompletedTask;
+                    }
+
+                    public ValueTask DisposeAsync()
+                    {
+                        _httpClient?.Dispose();
+                        return ValueTask.CompletedTask;
+                    }
+
+                    [Test]
+                    public void Test1()
+                    {
+                    }
+                }
+                """
+            );
+    }
+
+    // ========================================
+    // FIELD INITIALIZATION TESTS
+    // ========================================
+
+    [Test]
+    public async Task FieldInitialization_Flags_Issue()
+    {
+        await Verifier
+            .VerifyAnalyzerAsync(
+                """
+                using System.Net.Http;
+                using TUnit.Core;
+
+                public class DisposableFieldTests
+                {
+                    private HttpClient? {|#0:_httpClient|} = new HttpClient();
+
+                    [Test]
+                    public void Test1()
+                    {
+                    }
+                }
+                """,
+
+                Verifier.Diagnostic(Rules.Dispose_Member_In_Cleanup)
+                    .WithLocation(0)
+                    .WithArguments("_httpClient")
+            );
+    }
+
+    [Test]
+    public async Task FieldInitialization_No_Issue_When_Disposed_In_Dispose()
+    {
+        await Verifier
+            .VerifyAnalyzerAsync(
+                """
+                using System;
+                using System.Net.Http;
+                using TUnit.Core;
+
+                public class DisposableFieldTests : IDisposable
+                {
+                    private HttpClient? _httpClient = new HttpClient();
+
+                    public void Dispose()
+                    {
+                        _httpClient?.Dispose();
+                    }
+
+                    [Test]
+                    public void Test1()
+                    {
+                    }
+                }
+                """
+            );
+    }
+
+    [Test]
+    public async Task FieldInitialization_No_Issue_When_Disposed_In_DisposeAsync()
+    {
+        await Verifier
+            .VerifyAnalyzerAsync(
+                """
+                using System;
+                using System.Net.Http;
+                using System.Threading.Tasks;
+                using TUnit.Core;
+
+                public class DisposableFieldTests : IAsyncDisposable
+                {
+                    private HttpClient? _httpClient = new HttpClient();
+
+                    public ValueTask DisposeAsync()
+                    {
+                        _httpClient?.Dispose();
+                        return ValueTask.CompletedTask;
+                    }
+
+                    [Test]
+                    public void Test1()
+                    {
+                    }
+                }
+                """
+            );
+    }
+
+    [Test]
+    public async Task FieldInitialization_No_Issue_When_Disposed_In_After()
+    {
+        await Verifier
+            .VerifyAnalyzerAsync(
+                """
+                using System.Net.Http;
+                using TUnit.Core;
+
+                public class DisposableFieldTests
+                {
+                    private HttpClient? _httpClient = new HttpClient();
+
+                    [After(HookType.Test)]
+                    public void Cleanup()
+                    {
+                        _httpClient?.Dispose();
+                    }
+
+                    [Test]
+                    public void Test1()
+                    {
+                    }
+                }
+                """
+            );
+    }
+
+    // ========================================
+    // CONSTRUCTOR INITIALIZATION TESTS
+    // ========================================
+
+    [Test]
+    public async Task Constructor_Flags_Issue()
+    {
+        await Verifier
+            .VerifyAnalyzerAsync(
+                """
+                using System.Net.Http;
+                using TUnit.Core;
+
+                public class DisposableFieldTests
+                {
+                    private HttpClient? {|#0:_httpClient|};
+
+                    public DisposableFieldTests()
+                    {
+                        _httpClient = new HttpClient();
+                    }
+
+                    [Test]
+                    public void Test1()
+                    {
+                    }
+                }
+                """,
+
+                Verifier.Diagnostic(Rules.Dispose_Member_In_Cleanup)
+                    .WithLocation(0)
+                    .WithArguments("_httpClient")
+            );
+    }
+
+    [Test]
+    public async Task Constructor_No_Issue_When_Disposed_In_Dispose()
+    {
+        await Verifier
+            .VerifyAnalyzerAsync(
+                """
+                using System;
+                using System.Net.Http;
+                using TUnit.Core;
+
+                public class DisposableFieldTests : IDisposable
+                {
+                    private HttpClient? _httpClient;
+
+                    public DisposableFieldTests()
+                    {
+                        _httpClient = new HttpClient();
+                    }
+
+                    public void Dispose()
+                    {
+                        _httpClient?.Dispose();
+                    }
+
+                    [Test]
+                    public void Test1()
+                    {
+                    }
+                }
+                """
+            );
+    }
+
+    [Test]
+    public async Task Constructor_No_Issue_When_Disposed_In_DisposeAsync()
+    {
+        await Verifier
+            .VerifyAnalyzerAsync(
+                """
+                using System;
+                using System.Net.Http;
+                using System.Threading.Tasks;
+                using TUnit.Core;
+
+                public class DisposableFieldTests : IAsyncDisposable
+                {
+                    private HttpClient? _httpClient;
+
+                    public DisposableFieldTests()
+                    {
+                        _httpClient = new HttpClient();
+                    }
+
+                    public ValueTask DisposeAsync()
+                    {
+                        _httpClient?.Dispose();
+                        return ValueTask.CompletedTask;
+                    }
+
+                    [Test]
+                    public void Test1()
+                    {
+                    }
+                }
+                """
+            );
+    }
+
+    [Test]
+    public async Task Constructor_No_Issue_When_Disposed_In_After()
+    {
+        await Verifier
+            .VerifyAnalyzerAsync(
+                """
+                using System.Net.Http;
+                using TUnit.Core;
+
+                public class DisposableFieldTests
+                {
+                    private HttpClient? _httpClient;
+
+                    public DisposableFieldTests()
+                    {
+                        _httpClient = new HttpClient();
+                    }
+
+                    [After(HookType.Test)]
+                    public void Cleanup()
+                    {
+                        _httpClient?.Dispose();
+                    }
+
+                    [Test]
+                    public void Test1()
+                    {
+                    }
+                }
+                """
+            );
+    }
+
+    // ========================================
+    // BEFORE(TEST) WITH DISPOSE/DISPOSEASYNC TESTS
+    // ========================================
+
+    [Test]
+    public async Task BeforeTest_No_Issue_When_Disposed_In_Dispose()
+    {
+        await Verifier
+            .VerifyAnalyzerAsync(
+                """
+                using System;
+                using System.Net.Http;
+                using TUnit.Core;
+
+                public class DisposableFieldTests : IDisposable
+                {
+                    private HttpClient? _httpClient;
+
+                    [Before(HookType.Test)]
+                    public void Setup()
+                    {
+                        _httpClient = new HttpClient();
+                    }
+
+                    public void Dispose()
+                    {
+                        _httpClient?.Dispose();
+                    }
+
+                    [Test]
+                    public void Test1()
+                    {
+                    }
+                }
+                """
+            );
+    }
+
+    [Test]
+    public async Task BeforeTest_No_Issue_When_Disposed_In_DisposeAsync()
+    {
+        await Verifier
+            .VerifyAnalyzerAsync(
+                """
+                using System;
+                using System.Net.Http;
+                using System.Threading.Tasks;
+                using TUnit.Core;
+
+                public class DisposableFieldTests : IAsyncDisposable
+                {
+                    private HttpClient? _httpClient;
+
+                    [Before(HookType.Test)]
+                    public void Setup()
+                    {
+                        _httpClient = new HttpClient();
+                    }
+
+                    public ValueTask DisposeAsync()
+                    {
+                        _httpClient?.Dispose();
+                        return ValueTask.CompletedTask;
+                    }
+
+                    [Test]
+                    public void Test1()
+                    {
+                    }
+                }
+                """
+            );
+    }
+
+    // ========================================
+    // IASYNCINITIALIZER ADDITIONAL COMBINATIONS
+    // ========================================
+
+    [Test]
+    public async Task IAsyncInitializer_No_Issue_When_Disposed_In_Dispose()
+    {
+        await Verifier
+            .VerifyAnalyzerAsync(
+                """
+                using System;
+                using System.Net.Http;
+                using System.Threading.Tasks;
+                using TUnit.Core;
+                using TUnit.Core.Interfaces;
+
+                public class DisposableFieldTests : IAsyncInitializer, IDisposable
+                {
+                    private HttpClient? _httpClient;
+
+                    public Task InitializeAsync()
+                    {
+                        _httpClient = new HttpClient();
+                        return Task.CompletedTask;
+                    }
+
+                    public void Dispose()
+                    {
+                        _httpClient?.Dispose();
+                    }
+
+                    [Test]
+                    public void Test1()
+                    {
+                    }
+                }
+                """
+            );
+    }
+
+    [Test]
+    public async Task IAsyncInitializer_No_Issue_When_Disposed_In_After()
+    {
+        await Verifier
+            .VerifyAnalyzerAsync(
+                """
+                using System;
+                using System.Net.Http;
+                using System.Threading.Tasks;
+                using TUnit.Core;
+                using TUnit.Core.Interfaces;
+
+                public class DisposableFieldTests : IAsyncInitializer
+                {
+                    private HttpClient? _httpClient;
+
+                    public Task InitializeAsync()
+                    {
+                        _httpClient = new HttpClient();
+                        return Task.CompletedTask;
+                    }
+
+                    [After(HookType.Test)]
+                    public void Cleanup()
+                    {
+                        _httpClient?.Dispose();
+                    }
+
+                    [Test]
+                    public void Test1()
+                    {
+                    }
+                }
+                """
+            );
+    }
+
+    // ========================================
+    // STATIC FIELD WITH BEFORE(ASSEMBLY) TESTS
+    // ========================================
+
+    [Test]
+    public async Task BeforeAssembly_Static_Flags_Issue()
+    {
+        await Verifier
+            .VerifyAnalyzerAsync(
+                """
+                using System.Net.Http;
+                using TUnit.Core;
+
+                public class DisposableFieldTests
+                {
+                    private static HttpClient? {|#0:_httpClient|};
+
+                    [Before(HookType.Assembly)]
+                    public static void Setup()
+                    {
+                        _httpClient = new HttpClient();
+                    }
+
+                    [Test]
+                    public void Test1()
+                    {
+                    }
+                }
+                """,
+
+                Verifier.Diagnostic(Rules.Dispose_Member_In_Cleanup)
+                    .WithLocation(0)
+                    .WithArguments("_httpClient")
+            );
+    }
+
+    [Test]
+    public async Task BeforeAssembly_Static_No_Issue_When_Disposed_In_AfterAssembly()
+    {
+        await Verifier
+            .VerifyAnalyzerAsync(
+                """
+                using System.Net.Http;
+                using TUnit.Core;
+
+                public class DisposableFieldTests
+                {
+                    private static HttpClient? _httpClient;
+
+                    [Before(HookType.Assembly)]
+                    public static void Setup()
+                    {
+                        _httpClient = new HttpClient();
+                    }
+
+                    [After(HookType.Assembly)]
+                    public static void Cleanup()
+                    {
+                        _httpClient?.Dispose();
+                    }
+
+                    [Test]
+                    public void Test1()
+                    {
+                    }
+                }
+                """
+            );
+    }
+
+    // ========================================
+    // STATIC FIELD WITH BEFORE(TESTSESSION) TESTS
+    // ========================================
+
+    [Test]
+    public async Task BeforeTestSession_Static_Flags_Issue()
+    {
+        await Verifier
+            .VerifyAnalyzerAsync(
+                """
+                using System.Net.Http;
+                using TUnit.Core;
+
+                public class DisposableFieldTests
+                {
+                    private static HttpClient? {|#0:_httpClient|};
+
+                    [Before(HookType.TestSession)]
+                    public static void Setup()
+                    {
+                        _httpClient = new HttpClient();
+                    }
+
+                    [Test]
+                    public void Test1()
+                    {
+                    }
+                }
+                """,
+
+                Verifier.Diagnostic(Rules.Dispose_Member_In_Cleanup)
+                    .WithLocation(0)
+                    .WithArguments("_httpClient")
+            );
+    }
+
+    [Test]
+    public async Task BeforeTestSession_Static_No_Issue_When_Disposed_In_AfterTestSession()
+    {
+        await Verifier
+            .VerifyAnalyzerAsync(
+                """
+                using System.Net.Http;
+                using TUnit.Core;
+
+                public class DisposableFieldTests
+                {
+                    private static HttpClient? _httpClient;
+
+                    [Before(HookType.TestSession)]
+                    public static void Setup()
+                    {
+                        _httpClient = new HttpClient();
+                    }
+
+                    [After(HookType.TestSession)]
+                    public static void Cleanup()
+                    {
+                        _httpClient?.Dispose();
+                    }
+
+                    [Test]
+                    public void Test1()
+                    {
+                    }
+                }
+                """
+            );
+    }
+
+    // ========================================
+    // FUNC<IDISPOSABLE> SHOULD NOT BE FLAGGED
+    // ========================================
+
+    [Test]
+    public async Task Func_Returning_Disposable_No_Issue()
+    {
+        await Verifier
+            .VerifyAnalyzerAsync(
+                """
+                using System;
+                using System.Net.Http;
+                using TUnit.Core;
+
+                public interface IMyInterface : IDisposable
+                {
+                }
+
+                public class MyClass : IMyInterface
+                {
+                    public void Dispose()
+                    {
+                        Console.WriteLine("disposed");
+                    }
+                }
+
+                public class ExampleTest
+                {
+                    private readonly Func<IMyInterface> _factory = () => new MyClass();
+
+                    [Test]
+                    public void Test1()
+                    {
+                        using var t = _factory();
+                    }
+                }
+                """
+            );
+    }
+
+    [Test]
+    public async Task Func_Returning_HttpClient_No_Issue()
+    {
+        await Verifier
+            .VerifyAnalyzerAsync(
+                """
+                using System;
+                using System.Net.Http;
+                using TUnit.Core;
+
+                public class DisposableFieldTests
+                {
+                    private readonly Func<HttpClient> _clientFactory = () => new HttpClient();
+
+                    [Test]
+                    public void Test1()
+                    {
+                        using var client = _clientFactory();
+                    }
+                }
+                """
+            );
+    }
+
+    [Test]
+    public async Task Property_With_Func_Returning_Disposable_No_Issue()
+    {
+        await Verifier
+            .VerifyAnalyzerAsync(
+                """
+                using System;
+                using System.Net.Http;
+                using TUnit.Core;
+
+                public class DisposableFieldTests
+                {
+                    private Func<HttpClient> ClientFactory { get; } = () => new HttpClient();
+
+                    [Test]
+                    public void Test1()
+                    {
+                        using var client = ClientFactory();
+                    }
+                }
+                """
+            );
+    }
+
+    [Test]
+    public async Task Constructor_Func_Returning_Disposable_No_Issue()
+    {
+        await Verifier
+            .VerifyAnalyzerAsync(
+                """
+                using System;
+                using System.Net.Http;
+                using TUnit.Core;
+
+                public interface IMyInterface : IDisposable
+                {
+                }
+
+                public class MyClass : IMyInterface
+                {
+                    public void Dispose()
+                    {
+                        Console.WriteLine("disposed");
+                    }
+                }
+
+                public class ExampleTest
+                {
+                    private readonly Func<IMyInterface> _factory;
+
+                    public ExampleTest()
+                    {
+                        _factory = () => new MyClass();
+                    }
+
+                    [Test]
+                    public void Test1()
+                    {
+                        using var t = _factory();
+                    }
+                }
+                """
+            );
+    }
+
+    [Test]
+    public async Task BeforeTest_Func_Returning_Disposable_No_Issue()
+    {
+        await Verifier
+            .VerifyAnalyzerAsync(
+                """
+                using System;
+                using System.Net.Http;
+                using TUnit.Core;
+
+                public class DisposableFieldTests
+                {
+                    private Func<HttpClient>? _clientFactory;
+
+                    [Before(HookType.Test)]
+                    public void Setup()
+                    {
+                        _clientFactory = () => new HttpClient();
+                    }
+
+                    [Test]
+                    public void Test1()
+                    {
+                        using var client = _clientFactory!();
+                    }
+                }
+                """
+            );
+    }
 }

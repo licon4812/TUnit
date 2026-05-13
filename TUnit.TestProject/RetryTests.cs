@@ -14,6 +14,7 @@ public class RetryTests
     [Retry(1)]
     public void One()
     {
+        Console.WriteLine($@"Executing One... (attempt {RetryCount1 + 1})");
         RetryCount1++;
         throw new Exception("Failure in One");
     }
@@ -22,6 +23,7 @@ public class RetryTests
     [Retry(2)]
     public void Two()
     {
+        Console.WriteLine($@"Executing Two... (attempt {RetryCount2 + 1})");
         RetryCount2++;
         throw new Exception("Failure in Two");
     }
@@ -29,6 +31,7 @@ public class RetryTests
     [Test]
     public void Three()
     {
+        Console.WriteLine($@"Executing Three... (attempt {RetryCount3 + 1})");
         RetryCount3++;
         throw new Exception("Failure in Three");
     }

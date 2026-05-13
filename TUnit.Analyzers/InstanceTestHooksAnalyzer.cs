@@ -27,8 +27,7 @@ public class InstanceTestHooksAnalyzer : ConcurrentDiagnosticAnalyzer
         var attributes = methodSymbol.GetAttributes();
 
         var onlyOnceAttributes = attributes
-            .Where(x => x.IsStandardHook(context.Compilation, out _, out var level, out _) && level == HookLevel.Test)
-            .ToList();
+            .Where(x => x.IsStandardHook(context.Compilation, out _, out var level, out _) && level == HookLevel.Test);
 
         if (!onlyOnceAttributes.Any())
         {
@@ -44,8 +43,9 @@ public class InstanceTestHooksAnalyzer : ConcurrentDiagnosticAnalyzer
 
         if (!IsContextParameter(methodSymbol))
         {
+            var firstBadParam = FindFirstUnknownParameter(methodSymbol);
             context.ReportDiagnostic(Diagnostic.Create(Rules.MethodMustBeParameterless,
-                context.Symbol.Locations.FirstOrDefault())
+                firstBadParam?.Locations.FirstOrDefault() ?? context.Symbol.Locations.FirstOrDefault())
             );
         }
 
@@ -82,5 +82,21 @@ public class InstanceTestHooksAnalyzer : ConcurrentDiagnosticAnalyzer
         }
 
         return true;
+    }
+
+    private static IParameterSymbol? FindFirstUnknownParameter(IMethodSymbol methodSymbol)
+    {
+        foreach (var parameter in methodSymbol.Parameters)
+        {
+            if (parameter.Type.GloballyQualified() !=
+                WellKnown.AttributeFullyQualifiedClasses.TestContext.WithGlobalPrefix &&
+                parameter.Type.GloballyQualified() !=
+                WellKnown.AttributeFullyQualifiedClasses.CancellationToken.WithGlobalPrefix)
+            {
+                return parameter;
+            }
+        }
+
+        return null;
     }
 }

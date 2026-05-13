@@ -1,27 +1,48 @@
-﻿using Microsoft.CodeAnalysis;
-using TUnit.Core.SourceGenerator.CodeGenerators.Helpers;
-using TUnit.Core.SourceGenerator.CodeGenerators.Writers;
-using TUnit.Core.SourceGenerator.Extensions;
-using TUnit.Core.SourceGenerator.Models;
+using Microsoft.CodeAnalysis;
+using TUnit.Core.SourceGenerator.Models.Extracted;
 
 namespace TUnit.Core.SourceGenerator.CodeGenerators;
 
 [Generator]
 public class DynamicTestsGenerator : IIncrementalGenerator
 {
+    public const string ParseDynamicTests = "ParseDynamicTests";
+
     public void Initialize(IncrementalGeneratorInitializationContext context)
     {
+        var enabledProvider = context.AnalyzerConfigOptionsProvider
+            .Select((options, _) =>
+            {
+                options.GlobalOptions.TryGetValue("build_property.EnableTUnitSourceGeneration", out var value);
+                return !string.Equals(value, "false", StringComparison.OrdinalIgnoreCase);
+            });
+
         var standardTests = context.SyntaxProvider
             .ForAttributeWithMetadataName(
                 "TUnit.Core.DynamicTestBuilderAttribute",
                 predicate: static (_, _) => true,
-                transform: static (ctx, _) => GetSemanticTargetForTestMethodGeneration(ctx))
-            .Where(static m => m is not null);
+                transform: static (ctx, _) => ExtractDynamicTestModel(ctx))
+            .Where(static m => m is not null)
+            .Combine(enabledProvider)
+            .WithTrackingName(ParseDynamicTests);
 
-        context.RegisterSourceOutput(standardTests, (sourceContext, data) => GenerateTests(sourceContext, data!));
+        context.RegisterSourceOutput(standardTests, (sourceContext, data) =>
+        {
+            var (testData, isEnabled) = data;
+            if (!isEnabled)
+            {
+                return;
+            }
+
+            GenerateTests(sourceContext, testData!);
+        });
     }
 
-    static DynamicTestSourceDataModel? GetSemanticTargetForTestMethodGeneration(GeneratorAttributeSyntaxContext context)
+    /// <summary>
+    /// Extracts all needed data as primitives in the transform step.
+    /// This enables proper incremental caching.
+    /// </summary>
+    private static DynamicTestModel? ExtractDynamicTestModel(GeneratorAttributeSyntaxContext context)
     {
         if (context.TargetSymbol is not IMethodSymbol methodSymbol)
         {
@@ -38,14 +59,33 @@ public class DynamicTestsGenerator : IIncrementalGenerator
             return null;
         }
 
-        return methodSymbol.ParseDynamicTestBuilders();
+        var containingType = methodSymbol.ContainingType;
+        var testAttribute = methodSymbol.GetAttributes()
+            .FirstOrDefault(a => a.AttributeClass?.Name == "DynamicTestBuilderAttribute");
+
+        var filePath = testAttribute?.ConstructorArguments.ElementAtOrDefault(0).Value?.ToString() ?? string.Empty;
+        var lineNumber = testAttribute?.ConstructorArguments.ElementAtOrDefault(1).Value as int? ?? 0;
+
+        // Extract ALL data as primitives - no symbols escape this method
+        return new DynamicTestModel
+        {
+            FullyQualifiedTypeName = containingType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat),
+            MinimalTypeName = containingType.Name,
+            Namespace = containingType.ContainingNamespace?.ToDisplayString() ?? string.Empty,
+            MethodName = methodSymbol.Name,
+            IsStatic = methodSymbol.IsStatic,
+            IsAsync = methodSymbol.IsAsync,
+            ReturnType = methodSymbol.ReturnType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat),
+            FilePath = filePath,
+            LineNumber = lineNumber
+        };
     }
 
-    private void GenerateTests(SourceProductionContext context, DynamicTestSourceDataModel dynamicTestSource, string? prefix = null)
+    private static void GenerateTests(SourceProductionContext context, DynamicTestModel model)
     {
         try
         {
-            var className = dynamicTestSource.Class.Name;
+            var className = model.MinimalTypeName;
 
             using var sourceBuilder = new CodeWriter();
 
@@ -58,7 +98,7 @@ public class DynamicTestsGenerator : IIncrementalGenerator
             sourceBuilder.AppendLine();
             sourceBuilder.AppendLine("[global::System.Diagnostics.StackTraceHidden]");
             sourceBuilder.AppendLine("[global::System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]");
-            sourceBuilder.AppendLine($"[System.CodeDom.Compiler.GeneratedCode(\"TUnit\", \"{typeof(DynamicTestsGenerator).Assembly.GetName().Version}\")]");
+            sourceBuilder.AppendLine($"[global::System.CodeDom.Compiler.GeneratedCode(\"TUnit\", \"{typeof(DynamicTestsGenerator).Assembly.GetName().Version}\")]");
             using (sourceBuilder.BeginBlock($"file partial class {className} : global::TUnit.Core.IDynamicTestSource"))
             {
                 sourceBuilder.AppendLine("[global::System.Runtime.CompilerServices.ModuleInitializer]");
@@ -68,30 +108,32 @@ public class DynamicTestsGenerator : IIncrementalGenerator
                 }
 
                 sourceBuilder.EnsureNewLine();
-                using (sourceBuilder.BeginBlock("public global::System.Collections.Generic.IReadOnlyList<DynamicTest> CollectDynamicTests(string sessionId)"))
+                using (sourceBuilder.BeginBlock("public global::System.Collections.Generic.IReadOnlyList<global::TUnit.Core.AbstractDynamicTest> CollectDynamicTests(string sessionId)"))
                 {
                     using (sourceBuilder.BeginBlock("try"))
                     {
                         sourceBuilder.AppendLine(
                             $"""
-                             var context = new global::TUnit.Core.DynamicTestBuilderContext(@"{dynamicTestSource.FilePath}", {dynamicTestSource.LineNumber});
+                             var context = new global::TUnit.Core.DynamicTestBuilderContext(@"{model.FilePath}", {model.LineNumber});
                              """);
 
-                        var receiver = dynamicTestSource.Method.IsStatic
-                            ? dynamicTestSource.Class.GloballyQualified()
-                            : $"new {dynamicTestSource.Class.GloballyQualified()}()";
+                        var receiver = model.IsStatic
+                            ? model.FullyQualifiedTypeName
+                            : $"new {model.FullyQualifiedTypeName}()";
 
-                        sourceBuilder.AppendLine($"{receiver}.{dynamicTestSource.Method.Name}(context);");
+                        sourceBuilder.AppendLine($"{receiver}.{model.MethodName}(context);");
                         sourceBuilder.AppendLine("return context.Tests;");
                     }
                     using (sourceBuilder.BeginBlock("catch (global::System.Exception exception)"))
                     {
-                        FailedTestInitializationWriter.GenerateFailedTestCode(sourceBuilder, dynamicTestSource);
+                        GenerateFailedTestCode(sourceBuilder, model);
                     }
                 }
             }
 
-            context.AddSource($"Dynamic-{className}-{Guid.NewGuid():N}.Generated.cs", sourceBuilder.ToString());
+            // Deterministic filename - no GUID needed since file keyword prevents collisions
+            // and each method is unique within its type
+            context.AddSource($"Dynamic_{className}_{model.MethodName}.g.cs", sourceBuilder.ToString());
         }
         catch (Exception ex)
         {
@@ -104,5 +146,22 @@ public class DynamicTestsGenerator : IIncrementalGenerator
 
             context.ReportDiagnostic(Diagnostic.Create(descriptor, null, ex.ToString()));
         }
+    }
+
+    private static void GenerateFailedTestCode(CodeWriter sourceBuilder, DynamicTestModel model)
+    {
+        sourceBuilder.AppendLine(
+            $$"""
+              return new global::System.Collections.Generic.List<global::TUnit.Core.AbstractDynamicTest>
+                          {
+                              new global::TUnit.Core.FailedDynamicTest<{{model.FullyQualifiedTypeName}}>
+                              {
+                                  MethodName = "{{model.MethodName}}",
+                                  TestFilePath = @"{{model.FilePath}}",
+                                  TestLineNumber = {{model.LineNumber}},
+                                  Exception = exception
+                              }
+                          };
+              """);
     }
 }

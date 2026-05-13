@@ -34,8 +34,7 @@ public class AssemblyTestHooksAnalyzer : ConcurrentDiagnosticAnalyzer
         var attributes = methodSymbol.GetAttributes();
 
         var onlyOnceAttributes = attributes
-            .Where(x => x.IsStandardHook(context.Compilation, out _, out var level, out _) && level == HookLevel.Assembly)
-            .ToList();
+            .Where(x => x.IsStandardHook(context.Compilation, out _, out var level, out _) && level == HookLevel.Assembly);
 
         if (!onlyOnceAttributes.Any())
         {
@@ -65,8 +64,9 @@ public class AssemblyTestHooksAnalyzer : ConcurrentDiagnosticAnalyzer
 
         if (!IsAssemblyHookContextParameter(methodSymbol))
         {
+            var firstBadParam = FindFirstUnknownParameter(methodSymbol);
             context.ReportDiagnostic(Diagnostic.Create(Rules.UnknownParameters,
-                context.Symbol.Locations.FirstOrDefault(),
+                firstBadParam?.Locations.FirstOrDefault() ?? context.Symbol.Locations.FirstOrDefault(),
                 "empty or only contain `AssemblyHookContext` and `CancellationToken`")
             );
         }
@@ -104,5 +104,21 @@ public class AssemblyTestHooksAnalyzer : ConcurrentDiagnosticAnalyzer
         }
 
         return true;
+    }
+
+    private static IParameterSymbol? FindFirstUnknownParameter(IMethodSymbol methodSymbol)
+    {
+        foreach (var parameter in methodSymbol.Parameters)
+        {
+            if (parameter.Type.GloballyQualified() !=
+                WellKnown.AttributeFullyQualifiedClasses.AssemblyHookContext.WithGlobalPrefix &&
+                parameter.Type.GloballyQualified() !=
+                WellKnown.AttributeFullyQualifiedClasses.CancellationToken.WithGlobalPrefix)
+            {
+                return parameter;
+            }
+        }
+
+        return null;
     }
 }

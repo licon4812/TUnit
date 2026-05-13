@@ -1,6 +1,5 @@
-using System.Diagnostics.CodeAnalysis;
+using System.Diagnostics;
 using TUnit.Core.Helpers;
-using TUnit.Core.Interfaces;
 
 namespace TUnit.Core;
 
@@ -26,18 +25,24 @@ public sealed class GenericTestMetadata : TestMetadata
             return (context, metadata) =>
             {
                 var genericMetadata = (GenericTestMetadata)metadata;
-                
+
                 // If we have concrete instantiations, try to use them (AOT-compatible path)
                 if (genericMetadata.ConcreteInstantiations?.Count > 0)
                 {
                     // Determine the concrete types from the test arguments
                     var inferredTypes = InferTypesFromArguments(context.Arguments, metadata);
-                    
+
+                    string typeKey;
                     if (inferredTypes is { Length: > 0 })
                     {
                         // Create a key from the inferred types - must match source generator format
-                        var typeKey = string.Join(",", inferredTypes.Select(t => t.FullName ?? t.Name));
-                        
+                        var typeNames = new string[inferredTypes.Length];
+                        for (var i = 0; i < inferredTypes.Length; i++)
+                        {
+                            typeNames[i] = inferredTypes[i].FullName ?? inferredTypes[i].Name;
+                        }
+                        typeKey = string.Join(',', typeNames);
+
                         // Find the matching concrete instantiation
                         if (genericMetadata.ConcreteInstantiations.TryGetValue(typeKey, out var concreteMetadata))
                         {
@@ -45,39 +50,37 @@ public sealed class GenericTestMetadata : TestMetadata
                             return concreteMetadata.CreateExecutableTestFactory(context, concreteMetadata);
                         }
                     }
-                    
+                    else
+                    {
+                        typeKey = "unknown";
+                    }
+
                     // If we couldn't find a match but have instantiations, throw an error
                     var availableKeys = string.Join(", ", genericMetadata.ConcreteInstantiations.Keys);
                     throw new InvalidOperationException(
                         $"No concrete instantiation found for generic method {metadata.TestMethodName} " +
-                        $"with type arguments: {(inferredTypes?.Length > 0 ? string.Join(",", inferredTypes.Select(t => t.FullName ?? t.Name)) : "unknown")}. " +
+                        $"with type arguments: {typeKey}. " +
                         $"Available: {availableKeys}");
                 }
-                
+
                 // Fall back to runtime resolution (existing logic)
                 Func<TestContext, Task<object>> createInstance = async (testContext) =>
                 {
                     // Try to create instance with ClassConstructor attribute
-                    var attributes = metadata.AttributeFactory();
+                    var attributes = metadata.GetOrCreateAttributes();
+                    // TestSessionId defaults to string.Empty for allocation reasons — the
+                    // engine must assign a real session id before reaching this point.
+                    Debug.Assert(!string.IsNullOrEmpty(metadata.TestSessionId),
+                        $"TestSessionId must be assigned before creating a generic test instance for {metadata.TestName}");
                     var classInstance = await ClassConstructorHelper.TryCreateInstanceWithClassConstructor(
                         attributes,
                         TestClassType,
                         metadata.TestSessionId,
-                        testContext.Events,
-                        testContext.ObjectBag,
-                        metadata.MethodMetadata);
+                        testContext);
 
                     if (classInstance != null)
                     {
-                        // Apply property values using unified PropertyInjector
-                        await PropertyInjector.InjectPropertiesAsync(
-                            testContext,
-                            classInstance,
-                            PropertyDataSources,
-                            PropertyInjections,
-                            MethodMetadata,
-                            testContext.TestDetails.TestId);
-
+                        // Property injection is handled by SingleTestExecutor after instance creation
                         return classInstance;
                     }
 
@@ -125,20 +128,12 @@ public sealed class GenericTestMetadata : TestMetadata
                     }
                     else
                     {
-                        typeArgs = testContext.TestDetails.TestClassArguments?.OfType<Type>().ToArray() ?? Type.EmptyTypes;
+                        typeArgs = testContext.Metadata.TestDetails.TestClassArguments?.OfType<Type>().ToArray() ?? Type.EmptyTypes;
                     }
 
-                    var instance = InstanceFactory(typeArgs, context.ClassArguments ?? Array.Empty<object?>());
+                    var instance = InstanceFactory(typeArgs, context.ClassArguments ?? []);
 
-                    // Apply property values using unified PropertyInjector
-                    await PropertyInjector.InjectPropertiesAsync(
-                        testContext,
-                        instance,
-                        PropertyDataSources,
-                        PropertyInjections,
-                        MethodMetadata,
-                        testContext.TestDetails.TestId);
-
+                    // Property injection is handled by SingleTestExecutor after instance creation
                     return instance;
                 };
 
@@ -150,11 +145,21 @@ public sealed class GenericTestMetadata : TestMetadata
                     }
 
                     // Determine if the test method has a CancellationToken parameter
-                    var hasCancellationToken = ParameterTypes.Any(t => t == typeof(CancellationToken));
+                    var parameters = metadata.MethodMetadata.Parameters;
+                    var parameterTypes = new Type[parameters.Length];
+                    var hasCancellationToken = false;
+                    for (var i = 0; i < parameters.Length; i++)
+                    {
+                        parameterTypes[i] = parameters[i].Type;
+                        if (parameters[i].Type == typeof(CancellationToken))
+                        {
+                            hasCancellationToken = true;
+                        }
+                    }
 
                     if (hasCancellationToken)
                     {
-                        var cancellationTokenIndex = Array.IndexOf(ParameterTypes, typeof(CancellationToken));
+                        var cancellationTokenIndex = Array.IndexOf(parameterTypes, typeof(CancellationToken));
 
                         // Insert CancellationToken at the correct position
                         var argsWithToken = new object?[args.Length + 1];
@@ -191,33 +196,37 @@ public sealed class GenericTestMetadata : TestMetadata
             };
         }
     }
-    
+
     private static Type[]? InferTypesFromArguments(object?[]? arguments, TestMetadata metadata)
     {
         if (arguments == null || arguments.Length == 0)
+        {
             return null;
-            
+        }
+
         // For methods with generic parameters, infer types from the argument values
         var inferredTypes = new List<Type>();
-        
+
         // Get the method's generic parameters
         var methodInfo = metadata.TestClassType.GetMethod(metadata.TestMethodName);
         if (methodInfo == null || !methodInfo.IsGenericMethodDefinition)
+        {
             return null;
-            
+        }
+
         var genericParams = methodInfo.GetGenericArguments();
         var methodParams = methodInfo.GetParameters();
-        
+
         // Map argument types to generic parameters
         foreach (var genericParam in genericParams)
         {
             Type? inferredType = null;
-            
+
             // Find which method parameter uses this generic parameter
-            for (int i = 0; i < methodParams.Length && i < arguments.Length; i++)
+            for (var i = 0; i < methodParams.Length && i < arguments.Length; i++)
             {
                 var paramType = methodParams[i].ParameterType;
-                
+
                 // Direct match: parameter type is the generic parameter
                 if (paramType.IsGenericParameter && paramType.Name == genericParam.Name)
                 {
@@ -227,7 +236,7 @@ public sealed class GenericTestMetadata : TestMetadata
                     }
                     break;
                 }
-                
+
                 // Handle generic types like IEnumerable<T>, Func<T>, etc.
                 if (paramType.IsGenericType && arguments[i] != null)
                 {
@@ -239,16 +248,16 @@ public sealed class GenericTestMetadata : TestMetadata
                     }
                 }
             }
-            
+
             if (inferredType != null)
             {
                 inferredTypes.Add(inferredType);
             }
         }
-        
+
         return inferredTypes.Count > 0 ? inferredTypes.ToArray() : null;
     }
-    
+
     private static Type? InferTypeFromGenericParameter(Type paramType, Type argumentType, Type genericParam)
     {
         // Handle IEnumerable<T>
@@ -262,31 +271,31 @@ public sealed class GenericTestMetadata : TestMetadata
                 {
                     return argumentType.GetGenericArguments()[0];
                 }
-                
+
                 // For types that implement IEnumerable<T> but aren't directly IEnumerable<T>
                 // we can't easily determine the type parameter at runtime in an AOT-compatible way
                 // The source generator should handle this at compile time instead
                 return null;
             }
         }
-        
+
         // Handle Func<T1, T2, ...>
         if (paramType.IsGenericType && paramType.Name.StartsWith("Func`"))
         {
             var paramTypeArgs = paramType.GetGenericArguments();
-            Type? actualFuncType = argumentType;
-            
+            var actualFuncType = argumentType;
+
             // If the argument is not directly a Func, check if it implements one
             if (!argumentType.IsGenericType || !argumentType.Name.StartsWith("Func`"))
             {
                 // Could be a lambda or method group - can't easily determine types at runtime
                 return null;
             }
-            
+
             var actualTypeArgs = actualFuncType.GetGenericArguments();
-            
+
             // Find which position contains our generic parameter
-            for (int i = 0; i < paramTypeArgs.Length && i < actualTypeArgs.Length; i++)
+            for (var i = 0; i < paramTypeArgs.Length && i < actualTypeArgs.Length; i++)
             {
                 if (paramTypeArgs[i].IsGenericParameter && paramTypeArgs[i].Name == genericParam.Name)
                 {
@@ -294,36 +303,38 @@ public sealed class GenericTestMetadata : TestMetadata
                 }
             }
         }
-        
+
         // Handle other generic types recursively
         if (paramType.IsGenericType && argumentType.IsGenericType)
         {
             var paramGenericDef = paramType.GetGenericTypeDefinition();
             var argGenericDef = argumentType.IsGenericTypeDefinition ? argumentType : argumentType.GetGenericTypeDefinition();
-            
+
             if (paramGenericDef == argGenericDef)
             {
                 var paramTypeArgs = paramType.GetGenericArguments();
                 var actualTypeArgs = argumentType.GetGenericArguments();
-                
-                for (int i = 0; i < paramTypeArgs.Length && i < actualTypeArgs.Length; i++)
+
+                for (var i = 0; i < paramTypeArgs.Length && i < actualTypeArgs.Length; i++)
                 {
                     if (paramTypeArgs[i].IsGenericParameter && paramTypeArgs[i].Name == genericParam.Name)
                     {
                         return actualTypeArgs[i];
                     }
-                    
+
                     // Recursive check for nested generics
                     if (paramTypeArgs[i].IsGenericType)
                     {
                         var result = InferTypeFromGenericParameter(paramTypeArgs[i], actualTypeArgs[i], genericParam);
                         if (result != null)
+                        {
                             return result;
+                        }
                     }
                 }
             }
         }
-        
+
         return null;
     }
 }

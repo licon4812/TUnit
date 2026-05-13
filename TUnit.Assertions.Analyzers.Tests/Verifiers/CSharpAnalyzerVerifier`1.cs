@@ -3,13 +3,26 @@ using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp.Testing;
 using Microsoft.CodeAnalysis.Diagnostics;
 using Microsoft.CodeAnalysis.Testing;
-using TUnit.Assertions.AssertionBuilders;
+using TUnit.Assertions;
+using TUnit.Core;
 
 namespace TUnit.Assertions.Analyzers.Tests.Verifiers;
 
 public static partial class CSharpAnalyzerVerifier<TAnalyzer>
     where TAnalyzer : DiagnosticAnalyzer, new()
 {
+    private static ReferenceAssemblies GetReferenceAssemblies()
+    {
+#if NET472
+        return ReferenceAssemblies.NetFramework.Net472.Default;
+#elif NET8_0
+        return ReferenceAssemblies.Net.Net80;
+#elif NET9_0 || NET10_0_OR_GREATER
+        return ReferenceAssemblies.Net.Net90;
+#else
+        return ReferenceAssemblies.Net.Net80; // Default fallback
+#endif
+    }
     /// <inheritdoc cref="Microsoft.CodeAnalysis.Diagnostic"/>
     public static DiagnosticResult Diagnostic()
         => CSharpAnalyzerVerifier<TAnalyzer, DefaultVerifier>.Diagnostic();
@@ -28,14 +41,18 @@ public static partial class CSharpAnalyzerVerifier<TAnalyzer>
         var test = new Test
         {
             TestCode = source,
-            ReferenceAssemblies = ReferenceAssemblies.Net.Net90
+            ReferenceAssemblies = GetReferenceAssemblies()
                 .AddPackages([new PackageIdentity("xunit.v3.assert", "2.0.0")]),
             TestState =
             {
                 AdditionalReferences =
                 {
-                    typeof(TUnitAttribute).Assembly.Location,
-                    typeof(AssertionBuilder).Assembly.Location,
+                    TUnit.Tests.Shared.AnalyzerTestCompatibility.GetCompatibleDllPath("TUnit.Core", typeof(TUnitAttribute).Assembly),
+                    TUnit.Tests.Shared.AnalyzerTestCompatibility.GetCompatibleDllPath("TUnit.Assertions", typeof(Assert).Assembly),
+                    TUnit.Tests.Shared.AnalyzerTestCompatibility.GetCompatibleDllPath("TUnit.Assertions.Should", typeof(TUnit.Assertions.Should.ShouldExtensions).Assembly),
+#if NET8_0
+                    TUnit.Tests.Shared.AnalyzerTestCompatibility.GetSystemTextJson9DllPath(),
+#endif
                 },
             },
             CompilerDiagnostics = CompilerDiagnostics.None

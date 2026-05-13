@@ -1,31 +1,24 @@
 using System.Runtime.ExceptionServices;
+using System.Text;
 using TUnit.Assertions.Exceptions;
 
 namespace TUnit.Assertions;
 
+/// <summary>
+/// Internal implementation of Assert.Multiple() functionality.
+/// Accumulates assertion failures instead of throwing immediately,
+/// then throws all failures together when disposed.
+/// </summary>
 internal class AssertionScope : IDisposable
 {
     private static readonly AsyncLocal<AssertionScope?> CurrentScope = new();
     private readonly AssertionScope? _parent;
     private readonly List<Exception> _exceptions = [];
 
-    static AssertionScope()
-    {
-        AppDomain.CurrentDomain.FirstChanceException += InterceptException;
-    }
-
     internal AssertionScope()
     {
         _parent = GetCurrentAssertionScope();
         SetCurrentAssertionScope(this);
-    }
-
-    private static void InterceptException(object? sender, FirstChanceExceptionEventArgs firstChanceExceptionEventArgs)
-    {
-        if (GetCurrentAssertionScope() is { } validScope)
-        {
-            validScope._exceptions.Add(new MaybeCaughtException(firstChanceExceptionEventArgs.Exception));
-        }
     }
 
     public void Dispose()
@@ -42,24 +35,28 @@ internal class AssertionScope : IDisposable
             return;
         }
 
-        if (_exceptions.Count > 0 && _exceptions.All(e => e is not AssertionException))
+        if (_exceptions.Count == 0)
         {
-            // If there's no assertion exceptions, return, and user thrown exceptions should just propogate up
             return;
         }
 
-        // It could be an intercepted exception,
-        // In which case it should just throw itself, so we don't need to do that
         if (_exceptions.Count == 1)
         {
             ExceptionDispatchInfo.Capture(_exceptions[0]).Throw();
         }
 
-        if (_exceptions.Count > 1)
+        // Use StringBuilder for message concatenation instead of LINQ
+        var sb = new StringBuilder();
+        for (int i = 0; i < _exceptions.Count; i++)
         {
-            var message = string.Join(Environment.NewLine + Environment.NewLine, _exceptions.Select(e => e.Message));
-            throw new AssertionException(message, new AggregateException(_exceptions));
+            if (i > 0)
+            {
+                sb.Append(Environment.NewLine).Append(Environment.NewLine);
+            }
+            sb.Append(_exceptions[i].Message);
         }
+        var message = sb.ToString();
+        throw new AssertionException(message, new AggregateException(_exceptions));
     }
 
     internal static AssertionScope? GetCurrentAssertionScope()
@@ -77,11 +74,27 @@ internal class AssertionScope : IDisposable
         _exceptions.Add(exception);
     }
 
-    internal void RemoveException(Exception exception)
+    internal bool HasExceptions => _exceptions.Count > 0;
+
+    internal int ExceptionCount => _exceptions.Count;
+
+    internal Exception GetFirstException()
     {
-        if (_exceptions.Contains(exception))
+        return _exceptions.Count > 0 ? _exceptions[0] : throw new InvalidOperationException("No exceptions in scope");
+    }
+
+    internal Exception GetLastException()
+    {
+        return _exceptions.Count > 0 ? _exceptions[^1] : throw new InvalidOperationException("No exceptions in scope");
+    }
+
+    internal void RemoveLastExceptions(int count)
+    {
+        if (count > _exceptions.Count)
         {
-            _exceptions.Remove(exception);
+            throw new InvalidOperationException($"Cannot remove {count} exceptions when only {_exceptions.Count} exist");
         }
+
+        _exceptions.RemoveRange(_exceptions.Count - count, count);
     }
 }

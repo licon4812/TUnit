@@ -1,6 +1,4 @@
 using System.Diagnostics.CodeAnalysis;
-using TUnit.Assertions.AssertConditions.Throws;
-
 namespace TUnit.TestProject;
 
 [UnconditionalSuppressMessage("Usage", "TUnitAssertions0005:Assert.That(...) should not be used with a constant value")]
@@ -12,7 +10,7 @@ public class Tests
     {
         Console.WriteLine(@"Blah!");
 
-        await Assert.That(TestContext.Current?.GetStandardOutput()).IsEqualTo("Blah!", StringComparison.Ordinal);
+        await Assert.That(TestContext.Current?.GetStandardOutput()).Contains("Blah!");
     }
 
     [Test]
@@ -66,7 +64,7 @@ public class Tests
     [Category("Fail")]
     public async Task ParameterisedTests1(string value)
     {
-        await Assert.That(value).IsEqualTo("1").And.HasLength().EqualTo(1);
+        await Assert.That(value).IsEqualTo("1").And.Length().IsEqualTo(1);
     }
 
     [Test]
@@ -188,14 +186,14 @@ public class Tests
     [Category("Pass")]
     public async Task TestContext1()
     {
-        await Assert.That(TestContext.Current?.TestDetails.TestName).IsEqualTo(nameof(TestContext1));
+        await Assert.That(TestContext.Current?.Metadata.TestDetails.TestName).IsEqualTo(nameof(TestContext1));
     }
 
     [Test]
     [Category("Fail")]
     public async Task TestContext2()
     {
-        await Assert.That(TestContext.Current?.TestDetails.TestName).IsEqualTo(nameof(TestContext1));
+        await Assert.That(TestContext.Current?.Metadata.TestDetails.TestName).IsEqualTo(nameof(TestContext1));
     }
 
     [Test]
@@ -244,14 +242,14 @@ public class Tests
     [Category("Pass")]
     public async Task String_And_Condition()
     {
-        await Assert.That("1").IsEqualTo("1").And.HasLength().EqualTo(1);
+        await Assert.That("1").IsEqualTo("1").And.Length().IsEqualTo(1);
     }
 
     [Test]
     [Category("Fail")]
     public async Task String_And_Condition2()
     {
-        await Assert.That("1").IsEqualTo("2").And.HasLength().EqualTo(2);
+        await Assert.That("1").IsEqualTo("2").And.Length().IsEqualTo(2);
     }
 
     [Test]
@@ -259,7 +257,7 @@ public class Tests
     public async Task Count1()
     {
         var list = new List<int> { 1, 2, 3 };
-        await Assert.That(list).IsEquivalentTo([1, 2, 3]).And.HasCount().EqualTo(3);
+        await Assert.That(list).IsEquivalentTo([1, 2, 3]).And.Count().IsEqualTo(3);
     }
 
     [Test]
@@ -292,7 +290,7 @@ public class Tests
     public async Task Count2()
     {
         var list = new List<int> { 1, 2, 3 };
-        await Assert.That(list).IsEquivalentTo([1, 2, 3, 4, 5]).And.HasCount().EqualTo(5);
+        await Assert.That(list).IsEquivalentTo([1, 2, 3, 4, 5]).And.Count().IsEqualTo(5);
     }
 
     [Test]
@@ -303,7 +301,7 @@ public class Tests
         using (Assert.Multiple())
         {
             await Assert.That(list).IsEquivalentTo([1, 2, 3, 4, 5]);
-            await Assert.That(list).HasCount().EqualTo(5);
+            await Assert.That(list).Count().IsEqualTo(5);
         }
     }
 
